@@ -1,0 +1,3 @@
+metrics: [rmse, mae, ia, pearson_r]
+plots: [loss_curve, pred_vs_obs, residual_hist, timeseries_sample]
+dpi: 150

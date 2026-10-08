@@ -1,0 +1,26 @@
+# Raw inputs and preprocessing settings
+paths:
+  raw_csv: ../pilot testing/CNN-LSTM/Master_DL_Ready.csv
+  raster: ../pilot testing/CNN-LSTM/master_morphology_stack_500m.tif
+  station_locations: ../pilot testing/CNN-LSTM/OpenAQ Sensor Locations - OpenAQ Sensor Locations.csv
+  processed_dir: processed
+
+columns:            # TODO: fill in from Master_DL_Ready.csv
+  station_id: null
+  timestamp: null
+  target: null      # e.g. pm25
+  temporal_features: []
+
+window:
+  length_T: 24      # TODO: lookback steps
+  horizon: 1        # TODO: steps ahead to predict
+  stride: 1
+
+patch:
+  size_H: 16        # TODO: pixels per side, H == W
+  channels_C: null  # TODO: raster bands
+
+split:              # chronological; hold out whole stations for the spatial side
+  train_end: null   # TODO: e.g. "2024-06-30"
+  val_end: null     # TODO: e.g. "2024-09-30"
+  held_out_stations: []   # optional: stations only seen in test

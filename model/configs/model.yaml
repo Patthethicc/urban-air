@@ -1,0 +1,16 @@
+# Architecture hyperparameters (saved inside every checkpoint)
+spatial_cnn:
+  in_channels: null     # must equal data.patch.channels_C
+  conv_channels: [32, 64, 128]
+  kernel_size: 3
+  embed_dim: 64
+  dropout: 0.1
+temporal_lstm:
+  input_size: null      # must equal len(data.columns.temporal_features)
+  hidden_size: 64
+  num_layers: 2
+  dropout: 0.1
+fusion_head:
+  hidden_dims: [64, 32]
+  dropout: 0.1
+  out_dim: 1

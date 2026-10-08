@@ -1,0 +1,12 @@
+seed: 42
+device: auto            # auto | cpu | cuda
+epochs: 50
+batch_size: 64
+num_workers: 0
+optimizer:
+  name: adam
+  lr: 1.0e-3
+  weight_decay: 1.0e-5
+loss: mse               # TODO: mse | huber
+early_stopping_patience: 8
+grad_clip: 1.0
