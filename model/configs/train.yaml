@@ -1,12 +1,16 @@
 seed: 42
 device: auto            # auto | cpu | cuda
-epochs: 50
+epochs: 50              # upper bound per fit; early stopping usually ends sooner
 batch_size: 64
 num_workers: 0
 optimizer:
-  name: adam
+  name: adam            # adam | adamw
   lr: 1.0e-3
   weight_decay: 1.0e-5
-loss: mse               # TODO: mse | huber
+loss: mse               # mse | huber
+early_stopping: true    # false = train exactly `epochs` (what the tuned configuration expects)
 early_stopping_patience: 8
 grad_clip: 1.0
+cv:
+  enabled: true         # spatial k-fold on the training stations; fold best epochs set the final epoch count
+final_epochs: null      # override the epoch count of the final fit (null = mean best epoch of the folds)

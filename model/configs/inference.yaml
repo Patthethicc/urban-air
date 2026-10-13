@@ -1,0 +1,15 @@
+# City-wide inference (Section 4.5): one prediction + GeoCP interval for EVERY grid cell of the Master GeoTIFF.
+#
+# A cell without a sensor has no PM2.5 history of its own. Following the spatial-lag paragraph of
+# Preprocessing.txt ("areas without a PM2.5 reading rely on neighbouring cells' values"), the cell's
+# PM2.5 history is the spatial lag of its k nearest stations (data.yaml spatial_lag: k, weighting) at each
+# lag hour. That stand-in fills the PM2.5 and spatial-lag channels; patch, hour encoding and scalers are
+# exactly those of training.
+snapshot_hours: [8, 12, 17, 21]   # Output.txt: morning commute peak, midday baseline, afternoon peak, night decay
+                                  # (--date expands to these hours; --timestamp gives explicit hours)
+lag_reference: train    # train = neighbours are the proper-training stations (what the model and the GeoCP
+                        #         calibration saw); all = every station with data
+stride_px: 1            # predict every Nth pixel in each direction (must be odd). 1 = every cell.
+                        # A 10 m raster of the whole NCR has ~10^7 cells: raise this or use `window` for a first look.
+chunk_cells: 4096       # cells per forward pass
+window: null            # optional [row_start, row_stop, col_start, col_stop] in raster pixels

@@ -1,3 +1,14 @@
-metrics: [rmse, mae, ia, pearson_r]
-plots: [loss_curve, pred_vs_obs, residual_hist, timeseries_sample]
+# The three metrics of Validation.txt (computed on spatially withheld stations, in ug/m3 / unitless R2)
+metrics: [rmse, mae, r2]
+extra_metrics: [ia, pearson_r]      # still computed, listed separately as supplementary
+plots: [loss_curve, pred_vs_obs, residual_hist, timeseries_sample, geocp_coverage]
 dpi: 150
+timeseries_days: 7      # length of the sample time-series plot
+bias:                   # geostatistical bias detection on OUT-OF-FOLD residuals (training stations only)
+  cell_size_m: null     # grid-cell size for aggregating residuals; null = raster pixel
+  knn_k: 4              # neighbours in the spatial weights matrix
+  permutations: 999
+  alpha: 0.05           # significance level for global and local Moran's I
+  seed: 42
+  min_cells: 6          # fewer grid cells than this -> Moran's I is skipped
+  local_only_if_global_significant: true   # LISA only when the global test finds clustering

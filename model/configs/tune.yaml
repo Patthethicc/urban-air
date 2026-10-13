@@ -1,0 +1,37 @@
+# Bayesian hyperparameter optimisation (Training.txt): Gaussian-process surrogate + acquisition
+# function, nested spatial cross-validation (outer folds = held-out stations, inner folds = tuning).
+outer_folds: 3             # held-out stations that estimate how well the whole tuning procedure generalises
+inner_folds: 3             # inside each outer-training set: guide the search
+nested_evaluation: true    # false = skip the outer loop, only run the final search (much cheaper)
+n_calls: 12                # evaluations of the objective per search (every one trains inner_folds models)
+n_initial_points: 5        # random points before the surrogate takes over
+acq_func: EI               # EI | PI | LCB | gp_hedge
+random_state: 42
+row_stride: 8              # during the SEARCH use every Nth row (consecutive hours are near-duplicates)
+# ---- epochs: choose ONE mode with this switch --------------------------------------------------
+search_epochs: false       # false (default, cheapest): epochs are NOT searched. Every trial trains with
+                           #   early stopping (cap = max_epochs, stop after `patience` epochs without
+                           #   improvement), so a trial costs only the epochs it needs. Objective = best
+                           #   validation loss reached; the winning trial's mean best epoch becomes the
+                           #   tuned `epochs`.
+                           # true: `epochs` is searched like any other hyperparameter (range below).
+                           #   Every trial trains EXACTLY that many epochs, no early stopping, and the
+                           #   objective is the validation loss AFTER the last epoch, so a number of epochs
+                           #   that overfits is penalised. More expensive: every trial runs to its full count.
+max_epochs: 30             # used when search_epochs: false (upper limit per trial)
+patience: 4                # used when search_epochs: false
+epochs_space: {type: integer, low: 5, high: 25}     # used when search_epochs: true
+# Objective: ONE number for the whole network = mean (over inner folds) of the validation loss
+# (scaled MSE/Huber, after the dense head, on held-out stations). The spatial lag is recomputed inside
+# every fold from that fold's training stations only.
+space:
+  # global
+  learning_rate: {type: real, low: 1.0e-4, high: 1.0e-2, prior: log-uniform}
+  batch_size: {type: integer, low: 16, high: 128}
+  # spatial (CNN)
+  cnn_kernel_size: {type: categorical, values: [3, 5, 7]}
+  cnn_filters: {type: integer, low: 8, high: 48}       # first layer; deeper layers double it
+  # temporal (LSTM)
+  lstm_hidden_size: {type: integer, low: 16, high: 128}
+  recurrent_dropout: {type: real, low: 0.0, high: 0.5} # nn.LSTM dropout between stacked layers (needs num_layers > 1)
+  # optional: cnn_feature_map: {type: categorical, values: [pool, flatten]}

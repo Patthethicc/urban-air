@@ -1,0 +1,355 @@
+HOW THE CNN-LSTM PIPELINE WAS BUILT AND HOW IT RUNS
+====================================================
+Folder: model/        Run everything from inside model/.
+The same content, formatted as Markdown and followed by a step-by-step tutorial, is in README.md.
+Sources: Preprocessing.txt, Training.txt (thesis methodology), the pilot notebook
+         pilot testing/CNN-LSTM/Extra_Preprocessing_pipeline_FIXED.ipynb.
+
+
+1. FOLDER MAP
+-------------
+configs/            data.yaml  model.yaml  train.yaml  tune.yaml  geocp.yaml  report.yaml
+preprocessing/      clean_loader, spatial_partitioner, spatial_lag, temporal_window_builder,
+                    spatial_patch_extractor, multimodal_aligner, scalers,
+                    vector_sanitizer, raster_harmonizer, master_raster_builder (rasters stage)
+networks/           spatial_cnn, temporal_lstm, fusion_head, dual_branch_net
+training/           dataset, loss, metrics, trainer, checkpoint, predict,
+                    fold_features (per-fold spatial lag), tuning (Bayesian search), run_info
+uncertainty/        geocp, geocp_surface (per-cell interval rasters)
+inference/          cell_inference (a prediction for every raster cell)
+output/             volume (snapshots -> volume, daily mean, summary), aqi_maps (AQI-coloured maps)
+explain/            gradcam, gradcam_plots (Grad-CAM on the CNN branch)
+reporting/          snapshot_generator, plotters, spatial_bias (Moran's I / LISA)
+tests/              pytest suite (see section 12)
+processed/ checkpoints/ tuning/ snapshots/    generated output, git-ignored
+
+
+2. THE STAGES (python run_pipeline.py --stage <name>)
+-----------------------------------------------------
+rasters     one-off: vectors + rasters -> Master GeoTIFF (not needed for the pilot raster)
+preprocess  clean -> partition by location -> spatial lag -> windows -> patches -> scale -> save
+tune        Bayesian search with nested spatial CV  -> tuning/<id>/best_hyperparameters.json
+train       spatial CV on the training stations + final fit -> checkpoints/<run_id>/
+geocp       conformal intervals on top of the trained model -> snapshots/<run_id>/
+bias        Moran's I / LISA on the out-of-fold residuals -> snapshots/<run_id>/
+surface     per-cell GeoCP interval rasters from ANY point-prediction raster
+infer       city-wide inference + maps: daily volume, GeoCP intervals, 24 h mean, AQI maps
+explain     Grad-CAM of the hottest and coldest cells of one inferred snapshot
+report      metrics_summary.json + plots (runs geocp and bias first if they are missing)
+all         preprocess -> train -> geocp -> bias -> report
+clean       RESET (alias reset): dry run listing the generated outputs; --yes deletes them (README 2.13)
+Any config value can be changed for one run:  --override section.key=value
+Train with tuned values:                      --stage train --tuned
+
+
+3. PREPROCESSING (Preprocessing.txt)
+------------------------------------
+1. Per-sensor CSVs are read for sensors inside the raster extent and put on a strict hourly index.
+2. Gaps up to 24 hours are linearly interpolated; longer gaps stay entirely empty. (pandas'
+   limit= would fill the first 24 hours of a long gap, so gaps are measured first and then masked.)
+3. Stations are split BY LOCATION into train / calibration / test (seeded). Every row, lag window
+   and patch of a station stays in one partition. Test stations are not touched until the end.
+4. Spatial lag: for every station and hour, the inverse-distance mean of its k = 5 nearest
+   TRAINING stations (never itself).
+5. Windows: for each (station, hour t) the sequence of the T lag hours, each step carrying
+   [PM2.5, spatial lag, sin(hour), cos(hour)] (F = 4), target = PM2.5 at t. A sample is dropped
+   if any lag hour is missing.
+6. Patches: one patch per station cut from the Master GeoTIFF (320 m / raster resolution, zero
+   padded at the edge). Stored once per station (patches.npy) and looked up per sample.
+7. Scalers are fit on the training partition only: target (and every PM2.5-derived column, which
+   share its scaler), and per-band for the raster patches (one patch per training station).
+8. The hourly PM2.5 matrix is also saved (pm25_hourly.npz) so cross-validation can recompute the
+   spatial lag per fold (section 6).
+
+
+4. TRAINING (Training.txt)
+--------------------------
+Architecture (networks/): a CNN encodes the patch into a 1D vector, an LSTM encodes the lag
+sequence into its last hidden state, the two are concatenated (late fusion) and a dense head
+produces the PM2.5 prediction. One loss; the gradient splits at the concatenation point and
+flows into both branches (checked by tests/test_gradient_bifurcation.py). Adam updates all
+weights end to end.
+
+CNN feature map is a switch in configs/model.yaml:
+    spatial_cnn.feature_map: pool      (default) conv blocks -> average-pool to 1x1 -> linear layer
+    spatial_cnn.feature_map: flatten   conv blocks -> flatten the WHOLE map (channels x px x px)
+                                       -> linear layer (the literal reading of Training.txt).
+    "flatten" is much wider for production patches (128 x 32 x 32 = 131,072 inputs to the linear
+    layer), so it has far more parameters. Both are tested; both save into the checkpoint.
+
+`train` stage:
+  a) spatial k-fold CV over the training stations (data.yaml split.cv_folds). Each fold holds out
+     whole stations, recomputes the spatial lag from the fit stations (section 6) and trains with
+     early stopping. Fold metrics (in ug/m3) go into run_info.json.
+  b) final fit on ALL training stations for the mean best epoch of the folds (or the tuned epochs
+     with --tuned). Saved as checkpoints/<run_id>/best_dual_branch_model.pt.
+Early stopping means `epochs` (train.yaml) is only an upper limit: training stops once validation
+loss stops improving, so no more epochs are spent than needed.
+
+
+5. HYPERPARAMETER TUNING (Training.txt) - python run_pipeline.py --stage tune
+------------------------------------------------------------------------------
+Searched (configs/tune.yaml -> space), in the three groups of the text:
+    global    learning rate, batch size
+    spatial   CNN kernel size (odd: 3, 5, 7), number of filters (first layer; deeper layers double)
+    temporal  LSTM state size, recurrent dropout (nn.LSTM dropout between stacked layers)
+Optional extra: cnn_feature_map (pool | flatten) - a commented line in tune.yaml.
+
+Method: Bayesian optimisation. A Gaussian-process surrogate (skopt.gp_minimize) learns a map from
+hyperparameters to validation loss; an acquisition function (EI) picks the next candidate;
+every result is fed back. The first n_initial_points are random.
+
+Objective: ONE number for the whole dual-branch network = the mean, over the inner folds, of the
+best validation loss measured after the dense head on held-out stations. CNN and LSTM
+hyperparameters are therefore tuned together.
+
+Epochs - switch in configs/tune.yaml:  search_epochs: false | true
+  false (default, cheapest): epochs are NOT searched. Every trial trains with early stopping (cap
+    tune.max_epochs, patience tune.patience), so a weak configuration is abandoned early and a
+    trial costs only the epochs it needs. Objective = best validation loss reached. The epoch where
+    it occurred is recorded; the winning trial's mean best epoch becomes the tuned "epochs" for the
+    final fit.
+  true: epochs is searched like any other hyperparameter (tune.epochs_space). Every trial trains
+    EXACTLY that many epochs with no early stopping, and the objective is the validation loss after
+    the last epoch, so a count that overfits is penalised. More expensive: each trial runs to its
+    full epoch count. (The two modes are not mixed on purpose: searching epochs while also
+    early-stopping would make the searched value meaningless.)
+
+Nested spatial cross-validation (inside the TRAINING stations only):
+    OUTER fold k : a group of stations held out as a test set
+        INNER folds : GroupKFold over the remaining stations -> drive the search
+        search      : n_calls trials, each trains inner_folds models
+        refit       : train on all outer-training stations with the winning hyperparameters
+        score       : on the outer test stations (RMSE / MAE / R2 in ug/m3) -> tune_info.json
+    FINAL search : the same search with inner folds over ALL training stations
+                   -> best_hyperparameters.json
+The outer scores estimate how well the whole tuning procedure generalises to unseen stations.
+Calibration and test stations are never used. For speed the search uses every tune.row_stride-th
+row (consecutive hours are near-duplicates); refits and evaluation use all rows.
+
+Cost: n_calls x inner_folds trainings per search, times (outer_folds + 1) searches. Reduce
+n_calls, row_stride, outer_folds, or set nested_evaluation: false for a cheaper run.
+
+Outputs in tuning/<id>/: best_hyperparameters.json, tune_info.json (config, outer folds with their
+stations, hyperparameters and scores), search_outer_<k>.json and search_final.json (every trial:
+hyperparameters, loss, per-fold losses, best epochs, seconds), convergence_final.png.
+
+
+6. SPATIAL LAG PER FOLD (why and how)
+-------------------------------------
+Problem: preprocessing computes the spatial lag with all training stations as neighbours. Inside
+cross-validation that leaks: the readings of a validation station are a FEATURE of the fit
+stations, so they reach the model during training, and the validation score is optimistic.
+
+Fix (training/fold_features.py + preprocessing/spatial_lag.py):
+  - For each fold the reference set is that fold's FIT stations only.
+  - The neighbour table is rebuilt for it and the lag recomputed for every hour with lag_matrix
+    on the saved hourly matrix (pm25_hourly.npz); the lag channel of X_temporal is replaced
+    (scaled with the same target scaler).
+  - A validation / outer-test station gets its lag from fit stations too, exactly as calibration
+    and test stations do in production.
+  - Rows whose lag is not computable (no neighbour reported at one of the lag hours) are dropped
+    from that fold.
+  - The final fit on all training stations, calibration and test keep the preprocessing lag
+    (reference = all training stations), which is what production uses.
+Checks: tests/test_fold_features.py shows that changing a held-out station's readings changes no
+lag when it is not in the reference set (and does when it is, i.e. the leak). On the pilot data
+the recomputed lag with the full training set as reference equals the saved channel to float32
+precision.
+
+
+7. GEOCP (Preprocessing.txt partitioning + Validation.txt)
+----------------------------------------------------------
+Calibration stations are never used to fit the model. After training, their absolute errors
+|y - yhat| (in ug/m3, after inverse-transforming the standardised target) are the nonconformity
+scores alpha_i, written to snapshots/<run>/calibration_table.csv with projected x, y so the same
+GeoCP code can serve any model (XGBoost or CNN-LSTM) without format conversion.
+For a query location, each score is weighted by a kernel of the planar distance (metres, projected
+CRS) between its station and the query, the weights are normalised to sum to one, and the
+(1 - alpha) quantile of that weighted distribution is the interval half-width, applied symmetrically
+around the point prediction. The lower end is then clipped at 0; coverage is checked on the
+UNCLIPPED interval, the published width is hi - clipped lo.
+  geocp.yaml finite_sample_correction: false (default, as in the text) | true (adds the query's own
+  weight at +infinity: the classical weighted-conformal correction, wider when calibration is small).
+  Each geocp run scores BOTH options by leave-one-station-out on the calibration stations
+  (geocp.json -> correction_comparison) so the choice never has to use the test stations.
+Kernel and bandwidth are chosen by leave-one-station-out on the calibration stations (a spatially
+held-out subset): the narrowest intervals whose coverage stays within coverage_tolerance of
+1 - alpha. Only then are the test stations scored. Bandwidth .inf is plain split conformal.
+Before calibration / test are predicted, check_compatibility() confirms the checkpoint's patch
+size, band count, lags, feature order and scalers (sha1) equal what is on disk.
+
+Test evaluation (Table 4.2), in geocp.json / metrics_summary.json:
+  empirical coverage, mean and median interval width, mean width-to-prediction ratio
+  (width / max(prediction, width_ratio_floor)), coverage in the urban core and in peripheral zones.
+  Zones follow the distance of each test station to its nearest calibration sensor: urban core =
+  within geocp.yaml zone_threshold_m, null = the median over the test stations.
+Cell centres (Section 4.5.2): the patch is centred on the raster cell that contains the sensor, and
+GeoCP measures distances between CELL CENTRES. preprocess stores cell_row / cell_col / cell_x / cell_y
+per station (stations.csv); the calibration table carries cell_id and x, y = cell-centre coordinates.
+
+Per-cell surface (Section 4.5.3-4.5.4): --stage surface --prediction-raster pm25.tif builds a 4-band
+GeoTIFF (prediction, lower, upper, width) on the same extent / resolution / CRS as the prediction raster.
+
+City-wide inference (--stage infer --timestamp "2025-07-01 12:00", configs/inference.yaml):
+  Section 4.5 says the point predictions and intervals are written to aligned rasters but not how a
+  cell WITHOUT a sensor gets its model inputs. The only description is the spatial-lag paragraph of
+  Preprocessing.txt: areas without a reading "rely on neighbouring cells' values". This stage applies it:
+    - patch: the raster patch centred on the cell (vectorised, identical to the training patches);
+    - PM2.5 history: at each lag hour the spatial lag of the cell's k nearest stations (inverse
+      distance, same k / weighting as training) fills BOTH the PM2.5 and the spatial-lag channels;
+    - hour encoding and scalers exactly as in training; the checkpoint compatibility check runs first.
+  lag_reference: train (default) uses the proper-training stations as neighbours, which is what the
+  model and the GeoCP calibration saw; all uses every station.
+  stride_px / window limit the grid: a 10 m raster of the whole NCR has ~10^7 cells.
+  Output: snapshots/<run>/surface/<timestamp>/prediction.tif and geocp_surface.tif.
+
+
+8. VALIDATION (Validation.txt)
+------------------------------
+Nested spatial cross-validation inside the proper training partition (sections 4 and 5) never reads
+the calibration or test stations, and its hold-out stations are distinct from both.
+
+Metrics: the three of the text - RMSE, MAE and R2 - are the headline numbers (report.yaml metrics).
+IA and Pearson r are still computed and listed under "supplementary" (report.yaml extra_metrics).
+R2 reading: with model.spatial_cnn.enabled=false a TEMPORAL-ONLY baseline is trained (no CNN branch);
+python run_pipeline.py --stage report --run-id <full run> --baseline <temporal-only run> adds
+r2_gain (and RMSE / MAE change) on the same test rows. Note the spatial lag still feeds the LSTM in
+both runs; switch it off with --override data.spatial_lag.enabled=false (and re-run preprocess) for
+a strictly "no spatial information" baseline.
+
+Spatial bias (--stage bias, reporting/spatial_bias.py), residual = actual - predicted:
+  1. out-of-fold predictions of the spatial CV (checkpoints/<run>/oof_predictions.csv), training
+     stations only - an assertion refuses any calibration / test station;
+  2. mean residual per geographic grid cell (report.yaml bias.cell_size_m, null = raster pixel);
+  3. KNN spatial weights (bias.knn_k = 4), row-standardised;
+  4. Global Moran's I, 999 permutations, two-sided pseudo p-value;
+  5. only if significant: Anselin's Local Moran's I -> LISA clusters. High-High = hotspots of
+     systematic UNDER-prediction (actual > predicted), Low-Low = coldspots of OVER-prediction;
+     High-Low / Low-High are spatial outliers; the rest "Not significant";
+  6. clusters are overlaid on every band of the Master GeoTIFF (lisa_on_bands.png) and a per-cluster
+     band profile (std units from the all-cell mean) is written to spatial_bias.json, to see which
+     morphology the model keeps missing.
+Outputs: spatial_bias.json, residuals_by_cell.csv, lisa_map.png, lisa_on_bands.png.
+With few training stations (the pilot has 11) Moran's I has little power; bias.min_cells guards it.
+
+Order of access: nested CV / tuning (training stations) -> final fit (training stations) ->
+calibration predictions + GeoCP configuration -> test predictions, intervals, Table 4.2 metrics.
+
+
+9. OUTPUT: SPATIOTEMPORAL SURFACES, MAPS, EXPLAINABILITY (Output.txt)
+---------------------------------------------------------------------
+Inputs. Output.txt names seven input features: mean building height, aspect ratio, sigma_H, building
+density, street width, NDVI and the cyclical time encoding. The Master GeoTIFF carries the first six as
+bands (data.yaml raster.band_order: height, ndvi, building_density, street_width, aspect_ratio,
+height_std); sigma_H is new: Output.txt names it without a definition, the XGBoost side defines it as
+bh_stdev, the standard deviation of building height over each 500 m grid cell (Section 3.1.1 of the paper
+per its README, not seen here). For the 10 m raster it is the same quantity as a moving window:
+raster.height_std_neighborhood_m = 500 m around each pixel, so the band stays continuous. The time
+encoding (sin, cos of the hour) is an input of the LSTM branch, injected per snapshot, not a raster channel. The 500 m pilot raster has only the first 5 bands.
+The morphology is static: patches are cut from the same raster for every snapshot.
+
+CRS. One CRS runs through the whole pipeline: WGS 84 / UTM zone 51N (EPSG:32651), chosen with the team. Sensor
+positions are projected into it, the Master GeoTIFF is built in it (--stage rasters), patches and every KNN /
+GeoCP distance are planar metres in it, and the rasters and maps infer writes inherit the raster's CRS, so input
+and output always agree. (Output.txt names PRS92; the project does not use it.) Safeguards: data.crs must be
+projected in metres (a geographic CRS in degrees is refused); check_raster_crs() stops preprocess and inference
+when the raster is in another CRS; a checkpoint refuses data prepared in another CRS.
+
+Snapshots. --stage infer --date 2025-07-01 predicts the hours of inference.snapshot_hours (08:00, 12:00,
+17:00, 21:00: morning peak, midday, afternoon peak, night); --timestamp gives explicit hours. For every
+raster cell (patches overlap; stride_px 1) the CNN-LSTM predicts the centre cell of its patch. Cells
+without a sensor use the spatial-lag stand-in (section 7).
+Per date, in snapshots/<run>/surface/<YYYYMMDD>/:
+  prediction_volume.tif, lower_volume.tif, upper_volume.tif, width_volume.tif   one band per snapshot
+  prediction_daily_mean.tif     24-hour mean of the snapshots (a cell missing in any snapshot stays empty)
+  maps/aqi_HHMM.png, daily_panels.png, daily_mean.png
+  output_summary.json           level, share of cells above 35 ug/m3, AQI category shares, interval width;
+                                daily mean: cells above 50
+Maps: gradient on the Philippine AQI scale (configs/output.yaml aqi.bins), cells above
+highlight_threshold (35 ug/m3, unhealthy for sensitive groups) outlined; the daily mean is outlined at the
+24-hour guideline (daily_guideline, 50 ug/m3).
+Basemap (output.yaml basemap, four independent switches: enabled, web_tiles, vector_layers, strict). With
+everything on (the default) it is a fallback chain, so a run works online and offline with no change:
+1) web tiles via contextily (only a picture behind the raster, coordinates always come from the raster
+georeference; no Google Maps API). CARTO's raster basemaps need a FREE API key (carto.com/basemaps/apikey):
+put it in model/.env as CARTO_API_KEY (git-ignored; .env.example is the template). Without a key CARTO serves
+watermarked tiles, so none are requested; the key is read from the environment only and is replaced by *** in
+messages. The key is sent as ?key=<key>, as the xyzservices CartoDB.* providers define it. Other providers
+(e.g. OpenStreetMap.Mapnik) need none if the library is installed AND the tile host
+answers a 2-second connection test; 2) else the OFFLINE vector layers (OSM streets + study-area boundary from
+data.paths.streets / boundary, reprojected to data.crs and clipped to the map); 3) else a plain background.
+Each step is skipped quietly when unavailable. After tiles fail once (offline, blocked) the rest of the run does
+not retry them, so a run is not slowed by network timeouts. Tiles are cached in basemap_cache_dir (.tile_cache),
+so tiles fetched once online can be reused offline later. output_summary.json records what was used
+("basemap": web | vectors | none, plus the switches used).
+Switches: enabled=false -> plain background everywhere; web_tiles=false -> the network is never touched
+(offline machine); vector_layers=false -> no offline layers; strict=true -> an enabled source that is
+unavailable (library missing, server unreachable, layers missing) stops the run instead of falling back.
+Per run: --override output.basemap.web_tiles=false. The old single-string setting (auto | contextily | vectors |
+none) is still accepted. The basemap is only in the PNG maps, not in the GeoTIFF volumes.
+No GeoCP interval is defined for the daily mean: the intervals belong to single snapshots.
+AQI breakpoints: confirmed Good 0-25, Fair 25.1-35, Unhealthy for sensitive groups 35.1-45; Very
+unhealthy 45.1-55 is from ONE secondary source; the tiers above 55 are not verified - check DAO 2020-14
+and edit aqi.bins.
+
+Explainability (--stage explain --timestamp "2025-07-01 12:00", after infer for that date).
+Grad-CAM on the LAST convolutional layer of the CNN branch: channel weights = mean gradient of the scalar
+prediction, map = ReLU(weighted sum of the activations), rescaled to [0, 1] per patch (convolution
+padding keeps it the size of the patch, so it overlays the input). It is the gradient of the full
+prediction, so it shows what in this patch mattered given the temporal history. For the highest- and
+lowest-predicted cells (output.yaml explain.top_n / bottom_n) it writes gradcam_hot_cells.png and
+gradcam_cold_cells.png (every morphology band with the attended region outlined), gradcam_attention.csv
+and gradcam_summary.json: for each band, how many patch standard deviations higher the attended pixels
+are than the rest of the patch (explain.attention_quantile = top 20 %). Positive values for building
+density, aspect ratio, height or street width point at dense blocks, canyons and arterials; the overlays
+are still to be inspected by eye, as the text says. SHAP belongs to the XGBoost branch and is not here.
+A saliency map needs a patch of at least 3 x 3 pixels (the 10 m raster gives 32 x 32); on the 500 m
+pilot raster the stage reports that and skips.
+
+
+10. TRACKING EVERY RUN
+---------------------
+hyperparameters do NOT adjust themselves during train; whatever the YAMLs plus --override say is
+used. checkpoints/<run_id>/run_info.json records them (also copied to snapshots/<run_id>/):
+hyperparameters, derived shapes (T, F, C, patch size), parameter counts per branch, the full layer
+listing, git commit, partition sizes, per-fold CV results, final epochs and where they came from,
+tuned_from, test and calibration metrics, chosen GeoCP configuration.
+checkpoints/runs_index.csv has one row per run. The checkpoint stores the model config, so
+training.checkpoint.load_model(path) rebuilds the network without guessing.
+
+
+11. KNOWN LIMITS (state these in the thesis)
+-------------------------------------------
+- The split is spatial only: every partition covers the same hours, so a regional weather episode
+  appears in train and test. Scores measure generalisation to NEW LOCATIONS, not forecasting.
+- Fold-wise spatial lag changes the neighbour distances (fewer reference stations in a fold), so a
+  held-out station's lag is slightly less informative inside a fold than in production.
+- The pilot raster is 500 m, so each patch is 1 x 1 pixel and the CNN is nearly an MLP there.
+  The production 10 m raster gives 32 x 32. Only 18 of the 45 pilot sensors fall inside it.
+- With few calibration stations GeoCP coverage can fall below the target on test stations.
+- The rasters stage was tested on synthetic data only, not on the real building / street /
+  height / NDVI files.
+- Smoke runs used 1-4 epochs and tiny search budgets: they check the wiring, not the results.
+- City-wide inference is an interpretation: Section 4.5 does not spell out the model inputs of a cell
+  without a sensor; the spatial-lag stand-in follows the Preprocessing.txt paragraph. The model was
+  trained on sensors whose own lags are real readings (smoother stand-ins are a distribution shift) and
+  the GeoCP calibration scores also come from real histories, so intervals on stand-in cells may be too
+  narrow. A stricter alternative is to compute the calibration predictions with the same stand-in.
+- Inference at 10 m over the whole NCR is very heavy on a CPU; use stride_px / window to look first.
+- Output.txt compares the daily mean with coarser interpolations from prior local studies; that needs
+  external data and is not built.
+- The AQI tiers above 55 ug/m3 are not verified (section 9).
+- Moran's I on out-of-fold residuals describes the CV stations only, not the whole city.
+
+
+12. HOW IT WAS CHECKED
+----------------------
+pytest tests  -> config, seed, shapes, gradient flow to both branches (pool and flatten),
+trainer, checkpoint round trip, metrics (hand-computed), gap capping, patch/window alignment by
+hand, partitioning, spatial lag (hand-computed, leakage), per-fold lag, scalers, GeoCP,
+tuning (search, nested folds, epoch switch), run records, GeoCP (normalised vs corrected,
+clipping, Table 4.2 metrics, zones, grid vs exact quantiles, surface rasters), Moran's I / LISA
+(sign convention, significance), temporal-only baseline, checkpoint compatibility.
+End-to-end smoke runs on the pilot data: preprocess -> tune -> train --tuned -> geocp -> bias -> report,
+plus a temporal-only run compared with --baseline.

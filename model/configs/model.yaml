@@ -1,15 +1,22 @@
 # Architecture hyperparameters (saved inside every checkpoint)
+# in_channels, patch_px and input_size are DERIVED by config_parser.derive() from data.yaml + the raster; leave null.
 spatial_cnn:
-  in_channels: null     # must equal data.patch.channels_C
+  enabled: true       # false = TEMPORAL-ONLY baseline (no CNN branch); compare it with --baseline to see
+                        # how much R2 the morphology patches add
+  in_channels: null     # = number of Master GeoTIFF bands
+  patch_px: null        # = patch side in pixels (only used by feature_map: flatten)
   conv_channels: [32, 64, 128]
-  kernel_size: 3
+  kernel_size: 3        # keep odd: padding = kernel_size // 2 only preserves size for odd kernels
+  feature_map: pool     # pool    = average-pool the feature map to 1x1, then a linear layer -> embed_dim
+                        # flatten = flatten the whole feature map (channels * px * px), then a linear layer
+                        #           (literal reading of Training.txt; large for 32x32 patches)
   embed_dim: 64
   dropout: 0.1
 temporal_lstm:
-  input_size: null      # must equal len(data.columns.temporal_features)
+  input_size: null      # = F, features per timestep (see data.yaml temporal)
   hidden_size: 64
   num_layers: 2
-  dropout: 0.1
+  dropout: 0.1          # recurrent dropout: nn.LSTM applies it BETWEEN stacked layers, so keep num_layers >= 2
 fusion_head:
   hidden_dims: [64, 32]
   dropout: 0.1

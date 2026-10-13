@@ -1,0 +1,18 @@
+# Geographically weighted conformal prediction (calibration partition only)
+alpha: 0.1              # miscoverage -> 90 % intervals
+score: absolute_error   # |y - y_hat| in ug/m3
+min_lower_bound: 0.0    # PM2.5 cannot be negative; clip the lower interval end
+# Candidate configurations. The calibration stations pick one by leave-one-station-out:
+# the narrowest intervals whose coverage stays within `coverage_tolerance` of 1 - alpha.
+kernels: [gaussian, exponential]
+bandwidths_m: [2000, 5000, 10000, 20000, .inf]   # .inf = unweighted split conformal (baseline)
+coverage_tolerance: 0.02
+finite_sample_correction: false   # false = kernel weights normalised to sum to one (Validation.txt).
+                                  # true  = also put the query's own weight at +infinity (classical weighted
+                                  #         conformal correction; wider intervals when calibration is small)
+                                  # Every geocp run reports BOTH options scored by leave-one-station-out on the
+                                  # calibration stations (geocp.json -> correction_comparison). Decide with that,
+                                  # not with test-set coverage. Switch for one run: --override geocp.finite_sample_correction=true
+# Table 4.2: coverage is also reported by distance to the nearest calibration sensor.
+zone_threshold_m: null            # urban core = within this distance (m); null = median over the test stations
+width_ratio_floor: 1.0            # width / max(prediction, floor) so near-zero predictions do not blow up the ratio

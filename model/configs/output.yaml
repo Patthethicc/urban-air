@@ -1,0 +1,46 @@
+# Output (Output.txt): AQI-coloured prediction maps, daily volume, Grad-CAM.
+aqi:
+  # Philippine AQI, 24-hour PM2.5 in ug/m3 (DENR DAO 2020-14). Output.txt only fixes the 35 ug/m3 limit
+  # ("unhealthy for sensitive groups"). Confirmed: Good 0-25, Fair 25.1-35, Unhealthy for sensitive groups
+  # 35.1-45. "Very unhealthy 45.1-55" comes from ONE secondary source. The tiers above 55 are NOT verified:
+  # check them against the order and split the last bin if needed.
+  bins:
+    - {label: "Good", upper: 25, color: "#00e400"}
+    - {label: "Fair", upper: 35, color: "#ffd500"}
+    - {label: "Unhealthy for sensitive groups", upper: 45, color: "#ff7e00"}
+    - {label: "Very unhealthy", upper: 55, color: "#ff0000"}
+    - {label: "Acutely unhealthy / emergency", upper: null, color: "#8f3f97"}
+highlight_threshold: 35   # ug/m3: cells above it are outlined on every snapshot map
+daily_guideline: 50       # ug/m3: 24-hour National Ambient Air Quality Guideline Value, used on the daily mean
+basemap:                  # background of the PNG maps (never the GeoTIFFs). Independent switches:
+  enabled: true           #   master switch. false = plain background on every map
+  web_tiles: true         #   source 1: web tiles via contextily (needs the library AND internet).
+                          #   false = the network is never touched
+  vector_layers: true     #   source 2: OFFLINE OSM streets + study-area boundary from data.paths.streets / boundary
+  strict: false           #   false = fallback chain: web tiles -> offline layers -> plain; an unavailable source is
+                          #           skipped with one notice, and after tiles fail once the run stops retrying them
+                          #   true  = an enabled source that is unavailable stops the run with an error
+                          #           (library missing, tile server unreachable, layers missing): for CI / reproducibility
+  # Per run, without editing this file:  --override output.basemap.web_tiles=false   (offline machine)
+  #                                      --override output.basemap.enabled=false
+  # Web tiles are only a picture behind the raster; they never touch coordinates. No Google Maps API is involved.
+  # Legacy strings still work: auto | contextily | vectors | none.
+basemap_cache_dir: .tile_cache   # tiles downloaded once are kept here and reused when the machine is offline later
+basemap_provider: CartoDB.Positron   # any xyzservices name, e.g. OpenStreetMap.Mapnik, Esri.WorldGrayCanvas
+# CARTO providers (CartoDB.*) need a FREE API key: put it in model/.env as CARTO_API_KEY (see .env.example). Without
+# one CARTO serves watermarked tiles, so none are requested (the chain falls back to vectors / plain; with
+# basemap.strict the run stops). The key is read from the environment, never stored in a file written by the
+# pipeline, and removed from any error message.
+basemap_key_env: CARTO_API_KEY       # environment variable (set in .env) that holds the key
+carto_key_param: key                 # only used for providers whose URL has no key placeholder. The xyzservices CartoDB.*
+                                     # providers already define it as ?key=<key>, which is what is sent
+basemap_url: null                    # optional explicit tile URL instead of basemap_provider. ${NAME} is replaced from the
+                                     # environment, e.g.
+                                     # "https://basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png?key=${CARTO_API_KEY}"
+basemap_attribution: "© OpenStreetMap contributors © CARTO"   # drawn on the map when basemap_url is used
+show_stations: true       # draw the monitoring stations on the maps
+dpi: 150
+explain:                  # Grad-CAM on the CNN branch (--stage explain)
+  top_n: 6                # highest-predicted cells of the chosen snapshot
+  bottom_n: 6             # lowest-predicted cells
+  attention_quantile: 0.8 # "attended" pixels = the top 20 % of a patch's Grad-CAM values

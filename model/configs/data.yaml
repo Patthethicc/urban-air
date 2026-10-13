@@ -1,26 +1,107 @@
-# Raw inputs and preprocessing settings
+# Raw inputs and preprocessing settings (see Preprocessing.txt, sections 4.2.1 / 4.2.5)
+# Relative paths are resolved from the model/ folder by config_parser.
 paths:
-  raw_csv: ../pilot testing/CNN-LSTM/Master_DL_Ready.csv
-  raster: ../pilot testing/CNN-LSTM/master_morphology_stack_500m.tif
-  station_locations: ../pilot testing/CNN-LSTM/OpenAQ Sensor Locations - OpenAQ Sensor Locations.csv
+  master_raster: ../pilot testing/CNN-LSTM/master_morphology_stack_500m.tif   # swap for the 10 m stack
+  sensors_gpkg: null            # OpenAQ_Sensors.gpkg; when null the lat/lon CSV below is used
+  sensor_locations_csv: ../pilot testing/CNN-LSTM/OpenAQ Sensor Locations - OpenAQ Sensor Locations.csv
+  sensor_csv_dir: ../pilot testing/CNN-LSTM/Air Data    # one openaq_<location_id>*.csv per sensor
   processed_dir: processed
+  checkpoints_dir: checkpoints
+  snapshots_dir: snapshots
+  tuning_dir: tuning
+  # inputs of the one-off `rasters` stage (not needed for the pilot raster)
+  buildings_csv: null           # Google Open Buildings, WKT geometry column
+  streets: null                 # OSM road centerlines (gpkg / shp / geojson)
+  height_raster: null           # 4 m building height
+  ndvi_raster: null             # 10 m Sentinel-2 NDVI
+  boundary: null                # NCR study boundary polygon
+  raster_work_dir: processed/rasters
 
-columns:            # TODO: fill in from Master_DL_Ready.csv
-  station_id: null
-  timestamp: null
-  target: null      # e.g. pm25
-  temporal_features: []
+# ---- Coordinate reference system ---------------------------------------------------------------
+# One projected CRS for everything: sensor positions, the Master GeoTIFF, the patches, every KNN / GeoCP distance,
+# and the rasters and maps written by `infer` (they inherit the raster's CRS). WGS 84 / UTM zone 51N.
+# It must be PROJECTED in metres (planar distances in m); the raster's CRS is checked against it.
+crs: EPSG:32651
+timezone: Asia/Manila           # local_timestamp is parsed to naive local time
 
-window:
-  length_T: 24      # TODO: lookback steps
-  horizon: 1        # TODO: steps ahead to predict
-  stride: 1
+columns:
+  group: location_id
+  timestamp: local_timestamp
+  target: pm25_value
+  x: x_coordinate
+  y: y_coordinate
+  lat: latitude
+  lon: longitude
+
+clean:
+  min_value: 0.0                # readings outside [min, max] become missing (then maybe interpolated)
+  max_value: 1000.0
+
+time:
+  freq: 1h
+  max_gap_hours: 24             # linear interpolation cap; gaps LONGER than this are left entirely missing
+
+temporal:
+  lags: [3, 2, 1]               # oldest first -> T = len(lags)
+  rolling_window: null          # e.g. 3 -> adds rolling mean + std (ending at each step) per step
+  cyclical_hour: true           # sin_hour / cos_hour per step
+  # Features per timestep, in this order (F is derived, see config_parser.derive):
+  #   [pm25, (spatial_lag), (roll_mean, roll_std), (sin_hour, cos_hour)]
+  # A sample is dropped if any of its lag hours is missing.
+
+spatial_lag:                    # KNN spatial lag (Preprocessing.txt, "Spatial Lag")
+  enabled: true
+  k: 5                          # nearest stations
+  weighting: inverse_distance   # inverse_distance | uniform
+  # Neighbours come ONLY from proper-training stations; a station never counts itself.
+  # Applied at the same lag hours as the PM2.5 lags (neighbours' PM2.5 at t-3, t-2, t-1).
+  # Known limitation: inside nested spatial CV the val-fold stations are still neighbours of the
+  # fit-fold stations. Recompute the lag per fold if that matters for the thesis.
 
 patch:
-  size_H: 16        # TODO: pixels per side, H == W
-  channels_C: null  # TODO: raster bands
+  extent_m: 320                 # 320 m x 320 m footprint
+  zero_pad_edges: true          # always true: patches at the raster edge are zero padded
+  # Pixel count = round(extent_m / raster resolution) (32 at 10 m, 1 on the 500 m pilot raster).
+  # Patches are static per sensor: stored ONCE per station (patches.npy [S,C,H,W]) and looked up
+  # through a per-row station index. They are never repeated per row on disk.
 
-split:              # chronological; hold out whole stations for the spatial side
-  train_end: null   # TODO: e.g. "2024-06-30"
-  val_end: null     # TODO: e.g. "2024-09-30"
-  held_out_stations: []   # optional: stations only seen in test
+raster:                         # `rasters` stage
+  resolution_m: 10
+  lane_width_m: 3.0
+  min_width_m: 1.5
+  max_width_m: 70.0
+  aspect_neighborhood_m: 50
+  height_std_neighborhood_m: 500  # sigma_H band: std of building height in a window this wide around each pixel.
+                                  # 500 m = the footprint of the XGBoost side's `bh_stdev` (zonal std per 500 m grid
+                                  # cell); here it is a moving window so the band stays continuous at 10 m.
+  density_supersample: 4        # building density = mean of a 4x finer binary mask (true area fraction)
+  band_order: [height, ndvi, building_density, street_width, aspect_ratio, height_std]
+  # the 500 m pilot raster has only the first 5 bands (no sigma_H)
+  functional_class_widths:
+    motorway: 20.0
+    trunk: 16.0
+    primary: 12.0
+    secondary: 10.0
+    tertiary: 8.0
+    residential: 6.0
+    unclassified: 5.0
+    service: 4.0
+    living_street: 4.0
+    alley: 4.0
+    track: 3.0
+
+scaling:                        # every scaler is fit on the proper-training partition only
+  target: standard
+  pm25_features: use_target_scaler   # lags / spatial lag / rolling stats are PM2.5, so share the target scaler
+  bands: standard_per_band           # fit on the training STATIONS' patches (one per station, not per row)
+  cyclical: none                     # sin/cos already in [-1, 1]
+
+split:                          # SPATIAL: by monitoring location, never by row or time
+  group_col: location_id
+  test_fraction: 0.2            # final spatial test stations, untouched until the end
+  calibration_fraction: 0.2     # of the development stations, held out for GeoCP calibration
+  cv_folds: 3                   # nested spatial GroupKFold inside the proper-training stations
+  seed: 42
+  # optional hand-picked station lists override the fractions
+  test_stations: []
+  calibration_stations: []
