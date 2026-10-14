@@ -1,0 +1,55 @@
+{
+  "alphas": [
+    0.1
+  ],
+  "bandwidth_m": {
+    "0.1": null
+  },
+  "calibration_cells": [
+    14,
+    36,
+    103
+  ],
+  "finite_sample_correction": true,
+  "implemented_from": "thesis Section 3.5.2 (method) and 4.5.3-4.5.5 (implementation)",
+  "kernel": "gaussian",
+  "kernel_choice_note": "the manuscript does not name a kernel function; Gaussian exp(-u^2/2) chosen as the standard geoconformal choice",
+  "lower_bound_policy": "clipped to 0 for display only; coverage always on the unclipped interval, per Section 3.5.2",
+  "model": {
+    "n_estimators": 229,
+    "params": {
+      "colsample_bytree": 0.7623873301291946,
+      "gamma": 0.23332831606807716,
+      "learning_rate": 0.03896217029789141,
+      "max_depth": 4,
+      "min_child_weight": 1,
+      "reg_alpha": 2.3277134043030427,
+      "reg_lambda": 8.861577452533078,
+      "subsample": 0.5115312125207079
+    },
+    "params_from_outer_fold": 0
+  },
+  "n_calibration_records": 5770,
+  "n_test_records": 5420,
+  "nominal_coverage": [
+    0.9
+  ],
+  "test_cells": [
+    226,
+    266,
+    302
+  ],
+  "train_cells": [
+    78,
+    81,
+    95,
+    110,
+    117,
+    154,
+    182,
+    185,
+    223,
+    239,
+    274
+  ]
+}

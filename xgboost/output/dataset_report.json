@@ -1,0 +1,33 @@
+{
+  "cells_with_sensor": 17,
+  "date_max": "2026-07-03 02:00:00+08:00",
+  "date_min": "2024-08-16 10:00:00+08:00",
+  "dropped_by_gap_aware_lag_cleaning": 79568,
+  "dropped_missing_target": 0,
+  "duplicate_cell_hours": 105,
+  "duplicate_cells": [
+    78
+  ],
+  "finite_target_rows": 122841,
+  "raster_cells": 378,
+  "raw_rows": 122841,
+  "rows_in_duplicated_cells": 5501,
+  "rows_kept": 43273,
+  "rows_passing_lag_filter": 43273,
+  "rows_with_value_after_merge": 122841,
+  "sensor_completeness_median_pct": 21.263440244895133,
+  "sensor_completeness_min_pct": 7.382133995037221,
+  "sensors_mapped_into_raster": 18,
+  "sensors_outside_raster": 0,
+  "sensors_total": 18,
+  "share_of_rows_in_duplicated_cells": 0.1271231483835186,
+  "span_days": 685,
+  "value_summary": {
+    "max": 333.0,
+    "mean": 16.472373205694083,
+    "median": 14.7,
+    "min": 0.0,
+    "p90": 29.5,
+    "sd": 11.370284515256946
+  }
+}
