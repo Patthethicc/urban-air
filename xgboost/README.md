@@ -250,7 +250,7 @@ thesis_model/
     ├── inference/
     │   └── cell_inference.py        step 8: all 378 cells, stand-in history
     │
-    ├── output/
+    ├── maps/                        (named maps/, not output/: results live in outputs/)
     │   └── surfaces.py              step 8: per-cell tables, AQI maps, summaries, GeoTIFFs
     │
     ├── reporting/
@@ -333,8 +333,14 @@ for many query points at once, which is what makes the step 8 surfaces possible.
 **`inference/cell_inference.py`** — step 8. Per-cell predictions for the whole raster, filling the nine
 history features from the stand-in (section 2b).
 
-**`output/surfaces.py`** — step 8 output: per-cell CSV (always), GeoTIFF (when `rasterio` is installed),
-AQI map PNG, and a summary JSON carrying the section 2b caveat.
+**`maps/surfaces.py`** — step 8 presentation: per-cell CSV (always), GeoTIFF (when `rasterio` is
+installed), AQI map PNG, and a summary JSON carrying the section 2b caveat.
+
+> **Why `maps/` and not `output/`.** The generated results live in `outputs/`, so a code package called
+> `output/` sat one character away from a data folder called `outputs/` — easy to confuse, and neither
+> name said which was which. The CNN-LSTM branch calls its equivalent package `output/`; that branch is
+> untouched, because renaming tested code to fix a naming collision on our side is a bad trade. The
+> folders therefore occupy the same position in both trees but differ in name, deliberately.
 
 **`reporting/dataset_report.py`** — Deliverable 1. Re-runs the prep stages and reports rows kept/dropped
 with a per-requirement drop funnel, sensors, cells, date range, missingness and feature distributions.
@@ -410,9 +416,18 @@ with one actionable message telling you to run `--stage ablation` first. See `XG
 
 ## 10. Growing beyond the current grid
 
-The 378-cell raster covers 10.5 × 9 km at 500 m. Sensors outside it are **dropped** by the spatial join
-(`prep.build_sensor_to_grid_map` warns and skips), which is why the plan notes the wider OpenAQ network
-falls outside this footprint.
+The 378-cell raster covers 10.5 × 9 km at 500 m. A sensor whose coordinates fall outside that bbox is
+**dropped, in two steps that only announce themselves once**: `prep.build_sensor_to_grid_map` finds no
+containing cell and prints `WARNING: sensor ... falls outside full_morphology_grid.csv -- dropped`, then
+the `how='left'` morphology merge leaves its six morphology columns NaN and `dropna` removes the rows
+silently. All **18 current sensors are inside** the grid, so nothing is being lost today.
+
+This is a **prep** boundary, not a model one: the morphology features are generic cell attributes and no
+column of the 24-feature matrix is grid-unique, so any sensor assigned to a cell trains normally.
+Training on a sensor outside therefore needs only that the grid be extended to contain it (below) and
+the partitions be re-searched, since the cell count changes. The one real constraint is that every
+sensor and cell share a **single projected CRS**, because `geocp.py` computes metre distances
+(Eq. 3.40) and `spatial_cv.py` clusters centroids in metres.
 
 There is no larger morphology file in the repository. Rather than search for one, **build it**: the
 CNN-LSTM branch's `preprocessing/master_raster_builder.py` + `raster_harmonizer.py` produce a
