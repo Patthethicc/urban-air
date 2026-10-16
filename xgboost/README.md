@@ -7,6 +7,14 @@ weighted conformal prediction intervals, and city-wide inference.
 18 sensors · 17 grid cells · 43,273 hourly observations after cleaning · 685 days
 (2024-08-16 to 2026-07-03).
 
+**Scope of this document: the XGBoost branch only.** Everything described here lives in `XGBoost/`.
+`CNN-LSTM/` is **not** part of this branch and is not documented here — it is kept in the repository as
+a **worked example of the intended output** (what a finished pipeline of this shape produces: stages,
+configs, tests, snapshot surfaces, AQI maps, Grad-CAM). It is read in exactly two places below, and only
+to borrow a technique or a target to beat: the stand-in history for unmonitored cells (section 2b) and
+the raster builder that would extend the grid (section 9). Its own `CNN-LSTM/model/README.md` documents
+it.
+
 > **Status.** Steps 1–5 and 7–8 of the work plan (`00_XGBOOST_PLAN.pdf`) are complete: data preparation,
 > spatial partitions, the ablation, GeoCP, the Deliverable 1 dataset report, the saved model artifact,
 > and city-wide inference with per-cell intervals and AQI maps. **Step 6 (ground validation) is blocked**
@@ -15,8 +23,187 @@ weighted conformal prediction intervals, and city-wide inference.
 >
 > **Everything below is on held-out grid cells**, never on held-out rows. `STATUS.md` carries the running
 > state and the cumulative list of decisions that affect the manuscript; `STEP3_ABLATION.md` and
-> `STEP4_GEOCP.md` are the methods records for their steps. This README is both the write-up and the map
-> of the repository.
+> `STEP4_GEOCP.md` are the methods records for their steps.
+
+---
+
+## Repository layout
+
+Data lives in `data/`; code is grouped by what it does. Root-level scripts are thin shims, so every
+command named in the plan (`python geocp.py --alpha 0.10`, `python ablation.py --arms A B C`, and one per
+check script) still works as written.
+
+```
+thesis_model/
+│
+├── 00_XGBOOST_PLAN.pdf              the work plan (steps 1-8)
+├── README.md                        this file — XGBoost branch write-up and repository map
+├── STATUS.md                        state, decisions, cumulative manuscript-affecting changes
+├── STEP3_ABLATION.md                step 3 methods + results
+├── STEP4_GEOCP.md                   step 4 methods + results
+├── CNN-LSTM/                        REFERENCE ONLY — example of the intended output, not this branch
+│
+└── XGBoost/                         everything documented in this file
+    ├── run_pipeline.py              staged entry point (see "Verification and how to run")
+    ├── data.py                      resolves every input/output path, so scripts run from anywhere
+    │
+    ├── data/                        ALL inputs
+    │   ├── Master_DL_Ready.csv            18.0 MB  122,841 hourly readings, 18 sensors
+    │   ├── full_morphology_grid.csv       51 KB    378 raster cells @ 500 m
+    │   ├── fold_partitions.json           1.9 KB   the frozen 11 / 3 / 3 split
+    │   └── sensor_to_grid_map_full.csv    3.4 KB   derived, rewritten on every import
+    │
+    ├── preprocessing/
+    │   ├── prep.py                  data prep, features, gap-aware lags, spatial lag
+    │   ├── spatial_cv.py            cell partitions, fold maps, JSON persistence
+    │   └── spatial_bias.py          Moran's I / LISA on residuals
+    │
+    ├── training/
+    │   ├── ablation.py              feature arms + nested spatial CV
+    │   ├── partitions.py            rebuilds and validates the split
+    │   ├── artifacts.py             step 7: model.joblib + run_info.json + features.json
+    │   └── ablation_outputs.py      guard for the regenerable large outputs
+    │
+    ├── uncertainty/
+    │   └── geocp.py                 GeoConformal Prediction + quantile_grid
+    │
+    ├── inference/
+    │   └── cell_inference.py        step 8: all 378 cells, stand-in history
+    │
+    ├── maps/                        (named maps/, not output/: results live in outputs/)
+    │   ├── basemap.py               web-tile / OSM-street overlay for the maps
+    │   └── surfaces.py              step 8: per-cell tables, AQI maps, summaries, GeoTIFFs
+    │
+    ├── reporting/
+    │   └── dataset_report.py        Deliverable 1
+    │
+    ├── checks/                      the seven verification scripts
+    │
+    ├── configs/                     per-stage settings
+    ├── xgboost_pm25_pilot.ipynb     the narrative and the figures
+    │
+    ├── outputs/
+    │   ├── README.md                what is committed vs regenerated
+    │   ├── ablation_{results,summary}.csv   the ablation numbers
+    │   ├── dataset_report.md        Deliverable 1
+    │   ├── artifacts/<run_id>/      model.joblib + run_info.json + features.json
+    │   ├── surfaces/<date>/         per-snapshot CSV, AQI PNG, continuous PNG, summary JSON
+    │   └── geocp/, geocp_median_h/  step 4 intervals and coverage
+    │
+    └── <root shims>                 prep_n_proc_pilot.py · geocp.py · ablation.py
+                                     + one per check script
+```
+
+**Not listed because they are not needed to run or read the pipeline:**
+`full_morphology_grid_wkt.csv` (no code reads it; GIS reference), `.ipynb_checkpoints/` (Jupyter
+autosave), `__pycache__/`, and `CNN-LSTM/pilot testing/` (raw source data, duplicated inside that
+branch).
+
+### Inputs
+
+| File | Rows | What it is |
+|---|---|---|
+| `data/Master_DL_Ready.csv` | 122,841 | Hourly PM2.5 per sensor: `location_id`, `local_timestamp`, `pm25_target`, coordinates, and a `pm25_t-1/2/3` set (**replaced** by this pipeline, see Data). |
+| `data/full_morphology_grid.csv` | 378 cells | Morphology per raster cell: `bh_mean`, `bh_stdev`, `ndvi_mean`, `bldg_dens`, `aspect_ratio_mean`, plus cell bounding boxes and `row_index`/`col_index`. 17 cells contain a sensor. |
+| `data/fold_partitions.json` | 11 / 3 / 3 | The frozen cell split. Every later step reads it; regenerating it re-clusters the experiment. |
+
+### The grid's projection, verified rather than assumed
+
+The grid is in **EPSG:32651 (WGS84 / UTM 51N)**, and the map overlay depends on that being right. The 18
+sensors carry both `latitude`/`longitude` and projected `x_coordinate`/`y_coordinate`, so the projection
+can be reverse-engineered from the data instead of trusted from a label. Reprojecting the sensor lat/lons
+into each candidate CRS and comparing against the file's own x/y:
+
+| Candidate | Max error | Verdict |
+|---|---|---|
+| **EPSG:32651** (WGS84 / UTM 51N) | **0.00 m** | match |
+| EPSG:3123 (PRS92 / Philippines zone 3) | 215,370 m | no |
+| EPSG:32650 (WGS84 / UTM 50N) | 646,789 m | no |
+
+The implied UTM zone from the mean longitude (121.03°E) is 51, agreeing independently. This matters
+because a wrong CRS produces a map that looks entirely plausible and is silently in the wrong place.
+
+**Orientation:** `row_index` is **north-up** — `corr(row_index, northing) = −1.000`, so row 0 is the
+northernmost band, the usual raster convention. The original map drew `imshow(..., origin="upper")`
+against a row/column axis, and pairing that wrongly flips the city vertically with no error raised. The
+current map plots shapely boxes built from each cell's real `left/bottom/right/top`, so it is
+orientation-independent by construction.
+
+### Modules
+
+**`preprocessing/prep.py`** — runs **on import** and defines `df_clean`, `X`, `y` (log1p), `features`,
+`groups`, which is why every other script just imports it. It spatial-joins each sensor to its raster
+cell (rewriting `sensor_to_grid_map_full.csv`), derives `street_width_mean`, builds cyclical time and
+the three morphology × hour interactions, recomputes lags and rolling stats per sensor on a gap-exposed
+hourly index, log1p-transforms the target and drops rows whose window crossed a gap → `X = (43273, 24)`.
+It also defines `compute_spatial_lag(...)`, the fold-aware inverse-distance feature (thesis Section
+3.1.5), which is deliberately **not** in `features` because it is fold-dependent — it is arm C+.
+
+**`preprocessing/spatial_cv.py`** — `get_grid_centroids()`, `assign_spatial_folds()`,
+`get_outer_folds(exclude_grid_ids=...)`, `get_inner_folds()`, `get_partitions()`/`search_partitions()`
+(the 11/3/3 split), `build_fold_document()`/`save_fold_map()`/`load_fold_map()` (JSON persistence;
+`load_fold_map` **refuses** a document with no `partitions` key so a later step cannot silently treat
+every cell as training data), and `feasibility_report()`.
+
+**`preprocessing/spatial_bias.py`** — `aggregate_residuals_by_grid()`, `build_knn_weights()`,
+`global_morans_i()`, `local_morans_i()`, in numpy so libpysal/esda are not required. Called from the
+notebook.
+
+**`training/ablation.py`** — defines `ARM_FEATURES` = {A: TIME_ONLY 18, B: MORPH_TIME 15, C: FULL 24,
+C+: 27} and `validate_arm_features()`, which asserts the groups cover the import-time feature list
+exactly. `tune_and_evaluate()` is the nested CV core (per outer fold: EI search on inner folds, then fit
+and score the held-out fold in raw µg/m³ after `expm1`); `run()` loops the arms, checkpoints after every
+fold, and asserts all arms were scored on identical rows.
+
+**`training/partitions.py`** — rebuilds `fold_partitions.json` and validates it: spatial-lag coverage per
+partition, the leakage test (corrupt each held-out cell's own readings and confirm its lag is unchanged),
+contributor counts, determinism, JSON round-trip.
+
+**`training/artifacts.py`** — step 7. `save_model_artifact()` writes `model.joblib` + `run_info.json` +
+`features.json`. `run_info.json` carries the feature order (positional — wrong order gives
+plausible-looking wrong numbers), hyperparameters as fitted, `n_estimators`, the arm and outer fold they
+came from, the target transform, the residual convention, the partitions and fold maps, and library
+versions. `load_model_artifact(..., expect_features=...)` **refuses** a feature-list mismatch, because
+that failure is silent rather than loud.
+
+**`uncertainty/geocp.py`** — implemented from the thesis, not approximated: nonconformity scores
+(Eq. 3.36), metre distances (Eq. 3.40), kernel weights (Eq. 3.42) normalised to unity (Eq. 3.41/3.43),
+weighted quantile (Eq. 3.44/3.45), symmetric intervals (Eq. 3.46–3.50), 90% default target (Section
+4.5.4), coverage on the **unclipped** interval (Section 3.5.2), bandwidth by grid search on held-out
+calibration cells (Section 4.5.3), and Table 4.2 metrics. `quantile_grid()` produces exact half-widths
+for many query points at once, which is what makes the step 8 surfaces possible.
+
+**`inference/cell_inference.py`** — step 8. Per-cell predictions for the whole raster, filling the nine
+history features from the stand-in (see City-wide surfaces).
+
+**`maps/surfaces.py`** — step 8 presentation: per-cell CSV (always), GeoTIFF (when `rasterio` is
+installed), **two** map PNGs (see Why each snapshot has two maps), and a summary JSON carrying the
+stand-in caveat.
+
+**`maps/basemap.py`** — the map overlay. The technique reduces to one idea: draw the raster in **real
+projected coordinates** (`imshow(values, extent=(left, right, bottom, top))` with `set_aspect('equal')`)
+and put a basemap underneath at `zorder=0`, so anything sharing the CRS lines up with no manual
+registration. This uses that idea with a fallback chain — web tiles via `contextily`, then offline OSM
+streets/boundary via `geopandas`, then a plain background with a message saying why.
+`basemap.configure(web_tiles=False)` switches it off for an offline run; `strict=True` turns an
+unavailable enabled source into an error.
+
+**Neither basemap source is available in this repository yet**, so the maps currently render plain:
+`contextily` is not installed, and the `streets` / `boundary` paths are `null` (no such files exist).
+The moment either is provided the overlay appears with no code change:
+
+```
+pip install contextily          # then: basemap.configure(provider="OpenStreetMap.Mapnik")  # keyless
+# or: basemap.configure(boundary="data/ncr_boundary.geojson", streets="data/osm_streets.gpkg")
+```
+
+> **Why `maps/` and not `output/`.** The generated results live in `outputs/`, so a code package called
+> `output/` sat one character away from a data folder called `outputs/` — easy to confuse, and neither
+> name said which was which. The reference branch names its equivalent package `output/`; it is left
+> untouched, because renaming tested code to fix a naming collision on our side is a bad trade.
+
+**`reporting/dataset_report.py`** — Deliverable 1. Re-runs the prep stages and reports rows kept/dropped
+with a per-requirement drop funnel, sensors, cells, date range, missingness and feature distributions.
 
 ---
 
@@ -102,11 +289,11 @@ interval (thesis Section 3.5.2). 471 of 5,420 lower bounds fall below zero.
 
 `run_pipeline.py --stage infer --date YYYY-MM-DD` predicts **every cell of the morphology grid**
 (378 for the pilot) at the four thesis snapshot hours (08:00 / 12:00 / 17:00 / 21:00), with a GeoCP
-interval per cell, writing a per-cell table, an AQI map and a summary per snapshot.
+interval per cell, writing per snapshot a per-cell CSV, a GeoTIFF, two map PNGs and a summary JSON.
 
 The model's nine PM2.5-history features do not exist at a cell with no sensor, so they are filled with
-an inverse-distance **stand-in** from the k = 4 nearest proper-training stations — the approach the
-CNN-LSTM branch uses. Morphology, cyclical time and the interaction columns are exact.
+an inverse-distance **stand-in** from the k = 4 nearest proper-training stations. Morphology, cyclical
+time and the interaction columns are exact.
 
 **That stand-in biases the surface low, and it is measurable.** For 2025-07-23 08:00:
 
@@ -121,6 +308,18 @@ peaks a map exists to show. The surface also carries `standin_coverage` — the 
 73-hour history that neighbours actually reported, mean **0.63**, not 1.0. Between that and morphology's
 ~2.5% share of model attribution, **these maps are closer to a smoothed interpolation than to a
 morphology prediction**, and any published map must say so.
+
+One visible consequence: because the surface tops out near 22 µg/m³, the **AQI-tier map renders as a
+single flat colour** (every cell is in the 0–25 "Good" tier). Each snapshot therefore also gets a
+continuous-scale map, which is where the spatial pattern is readable. See *Why each snapshot has two
+maps*.
+
+**A note on reading the pattern.** Of 378 cells, 375 have distinct values, so the model does vary cell
+to cell. But the *shape* of the pattern is largely inherited from the stand-in: each cell's history is
+the inverse-distance mean of its four nearest training stations, so neighbouring cells share similar
+histories and the surface breaks into station-sized patches. An overlay makes the map geographically
+correct, not physically interpretable — a hotspot could be a genuinely polluted area or one station
+that reported high that morning, and this design cannot distinguish them.
 
 ## 3. Spatial bias
 
@@ -184,7 +383,7 @@ spatial-lag feature does collapse the pair by mean, so a two-sensor cell cannot 
 - **Tuning:** Bayesian optimisation with **Expected Improvement** (`acq_func='EI'`, thesis Eq. 3.28),
   8 random starts, 20 calls per arm per outer fold, `n_estimators` from early stopping (cap 500,
   patience 20) averaged over inner folds. Tuned **per arm**, so no arm inherits another arm's optimum.
-- **Verification:** each component has a dedicated check; see section 9.
+- **Verification:** each component has a dedicated check; see *Verification and how to run*.
 
 ## 6. Known limitations
 
@@ -200,168 +399,33 @@ spatial-lag feature does collapse the pair by mean, so a two-sensor cell cannot 
    target. Report the shortfall.
 5. **Thin inner folds.** Two outer folds contain an inner fold holding a single cell, so inner-CV model
    selection is noisy.
-6. **Cell 78 double-weighted** (12.7% of rows; see section 4).
+6. **Cell 78 double-weighted** (12.7% of rows; see Data).
 7. **Arms differ in tuning as well as features**, since each arm was tuned separately. A
    shared-parameter run would be the tighter control if a reviewer asks.
 8. **City-wide maps are stand-in driven and read low** — mean 9.75 vs 15.28 µg/m³ from real histories,
-   with the range crushed from 4–333 to 4–22. Neighbour coverage is 0.63, not 1.0. See section 2b.
+   with the range crushed from 4–333 to 4–22. Neighbour coverage is 0.63, not 1.0. See *City-wide
+   surfaces*.
 9. **The Bayesian search is not bit-reproducible for arm A** (pooled R² 0.638 → 0.630 across two runs).
    Arms B and C reproduce exactly, and `geocp.py` uses arm C, so the Step 4 numbers are stable.
 
-## 7. Repository layout
+## 7. The notebook
 
-Data lives in `data/`; code is grouped by what it does, mirroring the CNN-LSTM branch. Root-level
-scripts are thin shims so every command named in the plan still works.
-
-```
-thesis_model/
-│
-├── 00_XGBOOST_PLAN.pdf              the work plan (steps 1-8)
-├── README.md                        this file — write-up and repository map
-├── STATUS.md                        state, decisions, cumulative manuscript-affecting changes
-├── STEP3_ABLATION.md                step 3 methods + results
-├── STEP4_GEOCP.md                   step 4 methods + results
-├── CNN-LSTM/                        the other branch (own README)
-│
-└── XGBoost/
-    ├── run_pipeline.py              staged entry point (see section 9)
-    ├── data.py                      resolves every input/output path, so scripts run from anywhere
-    │
-    ├── data/                        ALL inputs
-    │   ├── Master_DL_Ready.csv            18.0 MB  122,841 hourly readings, 18 sensors
-    │   ├── full_morphology_grid.csv       51 KB    378 raster cells @ 500 m
-    │   ├── fold_partitions.json           1.9 KB   the frozen 11 / 3 / 3 split
-    │   └── sensor_to_grid_map_full.csv    3.4 KB   derived, rewritten on every import
-    │
-    ├── preprocessing/
-    │   ├── prep.py                  data prep, features, gap-aware lags, spatial lag
-    │   ├── spatial_cv.py            cell partitions, fold maps, JSON persistence
-    │   └── spatial_bias.py          Moran's I / LISA on residuals
-    │
-    ├── training/
-    │   ├── ablation.py              feature arms + nested spatial CV
-    │   ├── partitions.py            rebuilds and validates the split
-    │   ├── artifacts.py             step 7: model.joblib + run_info.json + features.json
-    │   └── ablation_outputs.py      guard for the regenerable large outputs
-    │
-    ├── uncertainty/
-    │   └── geocp.py                 GeoConformal Prediction + quantile_grid
-    │
-    ├── inference/
-    │   └── cell_inference.py        step 8: all 378 cells, stand-in history
-    │
-    ├── maps/                        (named maps/, not output/: results live in outputs/)
-    │   └── surfaces.py              step 8: per-cell tables, AQI maps, summaries, GeoTIFFs
-    │
-    ├── reporting/
-    │   └── dataset_report.py        Deliverable 1
-    │
-    ├── checks/                      the seven verification scripts (section 9)
-    │
-    ├── configs/                     per-stage settings
-    ├── xgboost_pm25_pilot.ipynb     the narrative and the figures
-    │
-    ├── outputs/
-    │   ├── README.md                what is committed vs regenerated
-    │   ├── ablation_{results,summary}.csv   the ablation numbers
-    │   ├── dataset_report.md        Deliverable 1
-    │   ├── artifacts/<run_id>/      model.joblib + run_info.json + features.json
-    │   ├── surfaces/<date>/         per-snapshot CSV, AQI PNG, summary JSON
-    │   └── geocp/, geocp_median_h/  step 4 intervals and coverage
-    │
-    └── <root shims>                 prep_n_proc_pilot.py · geocp.py · ablation.py
-                                     + one per check script
-```
-
-**Not listed because they are not needed to run or read the pipeline:**
-`full_morphology_grid_wkt.csv` (no code reads it; GIS reference), `.ipynb_checkpoints/` (Jupyter
-autosave), `__pycache__/`, and — in the wider repository — `CNN-LSTM/pilot testing/` (raw source data
-already represented inside each branch).
-
-### Inputs
-
-| File | Rows | What it is |
-|---|---|---|
-| `data/Master_DL_Ready.csv` | 122,841 | Hourly PM2.5 per sensor: `location_id`, `local_timestamp`, `pm25_target`, coordinates, and the CNN-LSTM branch's own `pm25_t-1/2/3` columns (**replaced** by this pipeline, see section 4). |
-| `data/full_morphology_grid.csv` | 378 cells | Morphology per raster cell: `bh_mean`, `bh_stdev`, `ndvi_mean`, `bldg_dens`, `aspect_ratio_mean`, plus cell bounding boxes and `row_index`/`col_index`. 17 cells contain a sensor. |
-| `data/fold_partitions.json` | 11 / 3 / 3 | The frozen cell split. Every later step reads it; regenerating it re-clusters the experiment. |
-
-### Modules
-
-**`preprocessing/prep.py`** — runs **on import** and defines `df_clean`, `X`, `y` (log1p), `features`,
-`groups`, which is why every other script just imports it. It spatial-joins each sensor to its raster
-cell (rewriting `sensor_to_grid_map_full.csv`), derives `street_width_mean`, builds cyclical time and
-the three morphology × hour interactions, recomputes lags and rolling stats per sensor on a gap-exposed
-hourly index, log1p-transforms the target and drops rows whose window crossed a gap → `X = (43273, 24)`.
-It also defines `compute_spatial_lag(...)`, the fold-aware inverse-distance feature (thesis Section
-3.1.5), which is deliberately **not** in `features` because it is fold-dependent — it is arm C+.
-
-**`preprocessing/spatial_cv.py`** — `get_grid_centroids()`, `assign_spatial_folds()`,
-`get_outer_folds(exclude_grid_ids=...)`, `get_inner_folds()`, `get_partitions()`/`search_partitions()`
-(the 11/3/3 split), `build_fold_document()`/`save_fold_map()`/`load_fold_map()` (JSON persistence;
-`load_fold_map` **refuses** a document with no `partitions` key so a later step cannot silently treat
-every cell as training data), and `feasibility_report()`.
-
-**`preprocessing/spatial_bias.py`** — `aggregate_residuals_by_grid()`, `build_knn_weights()`,
-`global_morans_i()`, `local_morans_i()`, in numpy so libpysal/esda are not required. Called from the
-notebook.
-
-**`training/ablation.py`** — defines `ARM_FEATURES` = {A: TIME_ONLY 18, B: MORPH_TIME 15, C: FULL 24,
-C+: 27} and `validate_arm_features()`, which asserts the groups cover the import-time feature list
-exactly. `tune_and_evaluate()` is the nested CV core (per outer fold: EI search on inner folds, then fit
-and score the held-out fold in raw µg/m³ after `expm1`); `run()` loops the arms, checkpoints after every
-fold, and asserts all arms were scored on identical rows.
-
-**`training/partitions.py`** — rebuilds `fold_partitions.json` and validates it: spatial-lag coverage per
-partition, the leakage test (corrupt each held-out cell's own readings and confirm its lag is unchanged),
-contributor counts, determinism, JSON round-trip.
-
-**`training/artifacts.py`** — step 7. `save_model_artifact()` writes `model.joblib` + `run_info.json` +
-`features.json`. `run_info.json` carries the feature order (positional — wrong order gives
-plausible-looking wrong numbers), hyperparameters as fitted, `n_estimators`, the arm and outer fold they
-came from, the target transform, the residual convention, the partitions and fold maps, and library
-versions. `load_model_artifact(..., expect_features=...)` **refuses** a feature-list mismatch, because
-that failure is silent rather than loud.
-
-**`uncertainty/geocp.py`** — implemented from the thesis, not approximated: nonconformity scores
-(Eq. 3.36), metre distances (Eq. 3.40), kernel weights (Eq. 3.42) normalised to unity (Eq. 3.41/3.43),
-weighted quantile (Eq. 3.44/3.45), symmetric intervals (Eq. 3.46–3.50), 90% default target (Section
-4.5.4), coverage on the **unclipped** interval (Section 3.5.2), bandwidth by grid search on held-out
-calibration cells (Section 4.5.3), and Table 4.2 metrics. `quantile_grid()` produces exact half-widths
-for many query points at once, which is what makes the step 8 surfaces possible.
-
-**`inference/cell_inference.py`** — step 8. Per-cell predictions for the whole raster, filling the nine
-history features from the stand-in (section 2b).
-
-**`maps/surfaces.py`** — step 8 presentation: per-cell CSV (always), GeoTIFF (when `rasterio` is
-installed), AQI map PNG, and a summary JSON carrying the section 2b caveat.
-
-> **Why `maps/` and not `output/`.** The generated results live in `outputs/`, so a code package called
-> `output/` sat one character away from a data folder called `outputs/` — easy to confuse, and neither
-> name said which was which. The CNN-LSTM branch calls its equivalent package `output/`; that branch is
-> untouched, because renaming tested code to fix a naming collision on our side is a bad trade. The
-> folders therefore occupy the same position in both trees but differ in name, deliberately.
-
-**`reporting/dataset_report.py`** — Deliverable 1. Re-runs the prep stages and reports rows kept/dropped
-with a per-requirement drop funnel, sensors, cells, date range, missingness and feature distributions.
-
-## 8. The notebook
-
-`XGBoost/xgboost_pm25_pilot.ipynb` (35 cells) is the narrative and the figures, **not** the source of
+`XGBoost/xgboost_pm25_pilot.ipynb` (37 cells) is the narrative and the figures, **not** the source of
 the numbers. Section headings: 1 Setup, **2 Data prep**, **2b Dataset report**, 3 Fold assignment,
 **3b Partitions + spatial lag**, **3c Feature arms**, **4 Nested CV / ablation**, **5 Ablation results**,
-6 Spatial bias, **7 Production model**, **8 GeoConformal Prediction**, 9 SHAP, 10 Summary.
+6 Spatial bias, **7 Production model**, **8 GeoConformal Prediction**, 9 SHAP, **9b City-wide
+surfaces**, 10 Summary.
 
 A bootstrap cell (cell 2) sets the working directory and `sys.path`, so the notebook runs from any
-launch directory. Section 8 calls the tested `geocp.py` functions rather than re-implementing the
-method, so the notebook and the CLI cannot drift apart.
+launch directory. The GeoCP section calls the tested `geocp.py` functions rather than re-implementing
+the method, so the notebook and the CLI cannot drift apart.
 
 The authoritative numbers are the CSVs in `outputs/`. The notebook's saved outputs predate Steps 3–4,
 so **it needs one top-to-bottom run** (about 7 minutes from a clean clone, most of it the ablation cell)
 before its figures reflect the current pipeline. That is why the checks, not the notebook, are the
 verification path.
 
-## 9. Verification and how to run
+## 8. Verification and how to run
 
 ```
 cd XGBoost
@@ -403,6 +467,12 @@ Every stage also runs as a script under its plan filename — `python geocp.py -
 Three of them read the per-row predictions, which are **not committed** (8.4 MB, regenerable). They stop
 with one actionable message telling you to run `--stage ablation` first. See `XGBoost/outputs/README.md`.
 
+**Gap worth closing:** the suite verifies `Grid_ID` reuse but nothing verifies the grid is
+*geographically* correct. The CRS and orientation facts above came from a one-off investigation, so if
+the grid is ever rebuilt nothing currently fails when the projection or the row order changes. A
+`checks/verify_georeference.py` asserting the sensor-vs-lat/lon CRS match, north-up `row_index`, a
+complete rectangle and no sensor outside the bbox would close it.
+
 ### Generated and derived files
 
 | File | Produced by | Notes |
@@ -412,25 +482,45 @@ with one actionable message telling you to run `--stage ablation` first. See `XG
 | `outputs/ablation_*.csv`, `oof_predictions_*.csv` | `training/ablation.py` | The ablation numbers, and the per-row predictions the checks use. |
 | `outputs/geocp*/*` | `uncertainty/geocp.py` | Intervals, coverage, bandwidth curve, config. |
 | `outputs/artifacts/<run_id>/` | `run_pipeline.py --stage save` | Model + run metadata. |
-| `outputs/surfaces/<date>/` | `run_pipeline.py --stage infer` | Per-cell tables, AQI maps, summaries. |
+| `outputs/surfaces/<date>/` | `run_pipeline.py --stage infer` | Per-snapshot `<ts>.csv`, `<ts>.tif`, `<ts>_aqi.png`, `<ts>_continuous.png`, `<ts>_summary.json`. |
 
-## 10. Growing beyond the current grid
+### Why each snapshot has two maps
 
-The 378-cell raster covers 10.5 × 9 km at 500 m. A sensor whose coordinates fall outside that bbox is
-**dropped, in two steps that only announce themselves once**: `prep.build_sensor_to_grid_map` finds no
-containing cell and prints `WARNING: sensor ... falls outside full_morphology_grid.csv -- dropped`, then
-the `how='left'` morphology merge leaves its six morphology columns NaN and `dropna` removes the rows
-silently. All **18 current sensors are inside** the grid, so nothing is being lost today.
+`<ts>_aqi.png` is the chart the thesis specifies (Section 4.6.2): the Philippine AQI tiers, cells above
+35 µg/m³ outlined, stations marked, and the basemap overlay when one is available. It is the right chart
+for a public-health reading.
+
+`<ts>_continuous.png` exists because **the AQI map comes out a single flat colour.** The tiers are
+0–25 / 25–35 / 35–45 / … and the stand-in surface spans only ~4–22 µg/m³ (see *City-wide surfaces*), so
+every cell lands in "Good" and the AQI map shows no spatial pattern at all. That is an honest summary
+and a useless one. The continuous panel uses a **fixed 0–25 µg/m³ ramp** so all four snapshots are
+directly comparable and the spatial structure is legible — which is where the hotspot and the north-east
+low actually show up.
+
+Notebook section **9b** renders all four snapshots of a date as one 2×2 panel with a single shared
+colourbar (`maps.surfaces.render_panel`). It reads whatever is already in `outputs/surfaces/` and infers
+the snapshots only when they are absent, the same reuse-then-compute pattern as the ablation cell. In the
+2025-07-23 panel the 08:00 hotspot near (286–288k E, 1.612–1.614M N) is clearly the strongest of the
+four, and 12:00 is the cleanest surface.
+
+## 9. Growing beyond the current grid
+
+The 378-cell raster covers 10.5 × 9 km at 500 m — a slice of Metro Manila, which is roughly 40 km
+across. A sensor whose coordinates fall outside that bbox is **dropped, in two steps that only announce
+themselves once**: `prep.build_sensor_to_grid_map` finds no containing cell and prints
+`WARNING: sensor ... falls outside full_morphology_grid.csv -- dropped`, then the `how='left'` morphology
+merge leaves its six morphology columns NaN and `dropna` removes the rows silently. All **18 current
+sensors are inside** the grid, so nothing is being lost today.
 
 This is a **prep** boundary, not a model one: the morphology features are generic cell attributes and no
 column of the 24-feature matrix is grid-unique, so any sensor assigned to a cell trains normally.
 Training on a sensor outside therefore needs only that the grid be extended to contain it (below) and
 the partitions be re-searched, since the cell count changes. The one real constraint is that every
-sensor and cell share a **single projected CRS**, because `geocp.py` computes metre distances
-(Eq. 3.40) and `spatial_cv.py` clusters centroids in metres.
+sensor and cell share a **single projected CRS** (EPSG:32651 here), because `geocp.py` computes metre
+distances (Eq. 3.40) and `spatial_cv.py` clusters centroids in metres.
 
 There is no larger morphology file in the repository. Rather than search for one, **build it**: the
-CNN-LSTM branch's `preprocessing/master_raster_builder.py` + `raster_harmonizer.py` produce a
+reference branch's `preprocessing/master_raster_builder.py` + `raster_harmonizer.py` produce a
 multi-band GeoTIFF to any extent and resolution from source vectors, driven by these `data.yaml` keys —
 all currently `null`:
 
@@ -448,3 +538,8 @@ Its output bands are `height, ndvi, building_density, street_width, aspect_ratio
 five keys and running that branch's `--stage rasters` is a **GIS data-acquisition task, not a code
 change**; afterwards, add the new sensors to `data/Master_DL_Ready.csv`, point `data.py` at the new
 grid, and re-run the stages.
+
+More cells is the single highest-value change available: the morphology result is a **power** problem at
+11 training cells (see *The headline result*), so a denser grid directly strengthens the test. It makes
+the experiment bigger, not different — it improves the ability to *detect* a morphology signal, and does
+not by itself create one.
