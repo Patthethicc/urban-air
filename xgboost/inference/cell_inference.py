@@ -71,7 +71,9 @@ def grid_cells(mapping_csv_path=None):
     grid['cx'] = (grid['left'] + grid['right']) / 2
     grid['cy'] = (grid['top'] + grid['bottom']) / 2
     grid['street_width_mean'] = grid['bh_mean'] / grid['aspect_ratio_mean']
-    cols = ['Grid_ID', 'cx', 'cy'] + MORPH_FEATURES
+    # left/bottom/right/top are kept so the maps can draw each cell as a real 500 m square in
+    # projected coordinates (maps/surfaces.py `_cell_geometries`).
+    cols = ['Grid_ID', 'cx', 'cy', 'left', 'bottom', 'right', 'top'] + MORPH_FEATURES
     return grid.groupby('Grid_ID', as_index=False)[cols[1:]].first()[cols]
 
 
@@ -139,11 +141,23 @@ def build_features(timestamp, cells, series, hour_pos, n_neighbours=4):
     roll24 = series[hour_pos - 24:hour_pos]       # hours t-24 .. t-1, exclusive of t
     roll72 = series[hour_pos - 72:hour_pos]
 
-    with np.errstate(invalid='ignore'):
-        roll24_mean = np.nanmean(roll24, axis=0)
-        roll24_std = np.nanstd(roll24, axis=0, ddof=1)
-        roll72_mean = np.nanmean(roll72, axis=0)
-        roll72_std = np.nanstd(roll72, axis=0, ddof=1)
+    # Cells with no reading in the window (the far field, or a sensor that is not reporting) have an
+    # all-NaN column. np.nanmean/nanstd then warn "Mean of empty slice" once per timestamp, which flooded
+    # the infer output with RuntimeWarnings that look like errors but are the expected case -- those cells
+    # are flagged by `history_present` and fall back to the interpolated stand-in. The moments below are
+    # computed directly so the same NaN comes out without the noise: they match nanmean and
+    # nanstd(ddof=1) exactly on any column that has data.
+    def _roll_moments(win):
+        valid = np.isfinite(win)
+        n_valid = valid.sum(axis=0)
+        filled = np.where(valid, win, 0.0)
+        mean = np.where(n_valid > 0, filled.sum(axis=0) / np.maximum(n_valid, 1), np.nan)
+        dev = np.where(valid, (win - mean) ** 2, 0.0)
+        var = np.where(n_valid > 1, dev.sum(axis=0) / np.maximum(n_valid - 1, 1), np.nan)
+        return mean, np.sqrt(var)
+
+    roll24_mean, roll24_std = _roll_moments(roll24)
+    roll72_mean, roll72_std = _roll_moments(roll72)
 
     hour = ts.hour
     dow = ts.dayofweek
@@ -214,7 +228,7 @@ def infer_timestamp(model, timestamp, *, station_df=None, train_cells=None, k=4,
     if missing:
         raise ValueError(f'the model expects feature(s) this pipeline did not build: {missing}')
     pred = np.expm1(model.predict(X[feat].to_numpy(dtype=float)))
-    out = cells[['Grid_ID', 'cx', 'cy']].copy()
+    out = cells[['Grid_ID', 'cx', 'cy', 'left', 'bottom', 'right', 'top']].copy()
     out['timestamp'] = pd.Timestamp(timestamp)
     out['prediction'] = pred
     out['standin_coverage'] = diag['standin_coverage'].values
