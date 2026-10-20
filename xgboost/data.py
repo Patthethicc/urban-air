@@ -22,12 +22,74 @@ DATA_DIR = os.path.join(ROOT, 'data')
 OUT_DIR = os.path.join(ROOT, 'outputs')
 CONFIG_DIR = os.path.join(ROOT, 'configs')
 
+def _load_dotenv(path):
+    """Read KEY=VALUE lines from `path` into os.environ, WITHOUT overwriting anything already set.
+
+    A real environment variable always wins, so `$env:XGB_FOLDS='pilot'` still overrides the file for
+    one command. Deliberately ~15 lines instead of a python-dotenv dependency: nothing else in this
+    branch needs it, and this keeps the install list unchanged. Blank lines, `#` comments and an
+    optional `export ` prefix are ignored, as are quotes around the value.
+    """
+    if not os.path.exists(path):
+        return
+    with open(path, encoding='utf-8') as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            if line.startswith('export '):
+                line = line[7:]
+            key, _, val = line.partition('=')
+            key, val = key.strip(), val.strip().strip("'").strip('"')
+            if key and key not in os.environ:
+                os.environ[key] = val
+
+
+# Load XGBoost/.env once, before any switch below is read. This is what lets the split be chosen from a
+# file instead of a per-session PowerShell variable.
+_load_dotenv(os.path.join(ROOT, '.env'))
+
+
+# ---------------------------------------------------------------------------------------------
+# Which DATASET the pipeline runs on. Set the environment variable to switch:
+#
+#     XGB_DATASET=full    (default) 84 locations, 1.49 M rows, 3,696-cell grid  <- the real data
+#     XGB_DATASET=pilot             18 sensors,    43 k rows,   378-cell grid    <- the pilot record
+#
+# The pilot files are never overwritten, so the published pilot results stay reproducible: running
+# with XGB_DATASET=pilot restores exactly the 378-cell / 11-3-3 configuration that produced them.
+# ---------------------------------------------------------------------------------------------
+DATASET = os.environ.get('XGB_DATASET', 'full').strip().lower()
+if DATASET not in ('full', 'pilot'):
+    raise ValueError(f"XGB_DATASET must be 'full' or 'pilot', got {DATASET!r}")
+
+_FILES = {
+    'full': {'master': 'Master_DL_Ready_full.csv', 'grid': 'morphology_grid_full.csv',
+             'folds': 'fold_partitions_full.json', 'mapping': 'sensor_to_grid_map_full.csv'},
+    'pilot': {'master': 'Master_DL_Ready.csv', 'grid': 'full_morphology_grid.csv',
+              'folds': 'fold_partitions.json', 'mapping': 'sensor_to_grid_map_full.csv'},
+}[DATASET]
+
 # ---- inputs ---------------------------------------------------------------------------------
-MASTER_CSV = os.path.join(DATA_DIR, 'Master_DL_Ready.csv')
-GRID_CSV = os.path.join(DATA_DIR, 'full_morphology_grid.csv')
+MASTER_CSV = os.path.join(DATA_DIR, _FILES['master'])
+GRID_CSV = os.path.join(DATA_DIR, _FILES['grid'])
 GRID_WKT_CSV = os.path.join(DATA_DIR, 'full_morphology_grid_wkt.csv')
-SENSOR_MAP_CSV = os.path.join(DATA_DIR, 'sensor_to_grid_map_full.csv')
-FOLD_JSON = os.path.join(DATA_DIR, 'fold_partitions.json')
+SENSOR_MAP_CSV = os.path.join(DATA_DIR, _FILES['mapping'])
+# XGB_FOLDS=shared switches every stage to the split shared with the CNN-LSTM run, so one command can
+# reproduce the comparable experiment without editing files:
+#     $env:XGB_FOLDS='shared'; python run_pipeline.py --stage all
+_FOLDS_OVERRIDE = os.environ.get('XGB_FOLDS', '').strip().lower()
+# The shared split is defined on the full 83-station network only: it names stations the 18-sensor
+# pilot does not contain, so honouring it there would leave every partition empty (which made
+# checks/verify_geocp.py divide by zero). Ignore it for any other dataset, with a loud note.
+if _FOLDS_OVERRIDE == 'shared' and DATASET != 'full':
+    print('[data] XGB_FOLDS=shared ignored: the shared split exists only for the full network '
+          '(dataset=%s), using this dataset\'s own folds' % DATASET)
+    _FOLDS_OVERRIDE = ''
+FOLD_JSON = (os.path.join(DATA_DIR, 'fold_partitions_shared.json')
+             if _FOLDS_OVERRIDE == 'shared' else os.path.join(DATA_DIR, _FILES['folds']))
+LOCATIONS_CSV = os.path.join(DATA_DIR, 'sensor_locations.csv')
+RASTER_TIF = os.path.join(DATA_DIR, 'master_raster_v2.tif')
 
 # ---- outputs --------------------------------------------------------------------------------
 ABLATION_RESULTS = os.path.join(OUT_DIR, 'ablation_results.csv')
