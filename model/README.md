@@ -16,7 +16,7 @@ What you get from one run:
 
 > **Status.** Runs on the real data in the repo's `data/` folder: a 10 m Master GeoTIFF (EPSG:32651, 5 bands,
 > 27 × 39 km) and the OpenAQ sensors (44 stations with readings, 2024-08-13 to 2026-10-15). The pipeline runs end to
-> end and 313 tests pass. The numbers quoted in this file come from short smoke runs (2 epochs), so they show that the
+> end and 331 tests pass. The numbers quoted in this file come from short smoke runs (2 epochs), so they show that the
 > wiring works, not what the model can reach. Three things to know before relying on results: the raster stops short of
 > the southern tip of the NCR ([2.14](#214-covering-the-whole-ncr)), a full-resolution city map takes hours on a CPU
 > ([2.6](#26-make-the-maps)), and the pipeline has not been trained to convergence on this data yet.
@@ -117,13 +117,40 @@ sensor_csv_dir: [../data/OpenAQ, ../data/QC Data Converted]
 All 40 sites lie inside the raster, so `--stage coverage` reports them as covered. They are all in Quezon City and the
 stations are randomly split, so adding them makes the sensor network much denser there than elsewhere in the NCR.
 
+### 2.1c The combined, cleaned dataset (both networks, three year ranges)
+
+`python -m preprocessing.combine_dataset` (from `model/`) merges OpenAQ and QC into one cleaned table, using the findings of
+`eda/eda_results/EDA_Report.md` and an audit of the files, and writes `data/Combined Dataset/` (details and counts in the `README.md`
+generated there). Readings are removed, and listed with their reason in `excluded_readings.csv`, when they are: empty; at or below
+0.5 µg/m³ (dropouts, negatives); above 1000; inside the New Year fireworks window (Dec 31 21:00 to Jan 1 06:00); a QC reading before
+the site's installation date (it looks backfilled); or a lone spike (above 150 and more than 5 times the mean of the other stations
+that hour, which is what 85 % of the remaining readings above 150 are). Nothing is interpolated or rescaled.
+
+| Folder | Starts | Meaning |
+|---|---|---|
+| `full` | 2021-07-09 | everything that passes the rules |
+| `from_2023` | 2023-01-01 | drops 2021-2022, when only 8 to 20 stations existed and few reported together |
+| `from_2024` | 2024-01-01 | drops 2021-2023; from here 40 QC stations run together |
+| `full_with_preinstall`, `from_2023_with_preinstall`, `from_2024_with_preinstall` | as above | the same ranges but KEEPING the QC readings before each site's installation date |
+
+The `*_with_preinstall` twins exist so that rule can be tested as an experiment (it removes 20,708 readings, 18,596 of them in Jan-Mar
+2024, so the year ranges alone do not remove them). Train once on a range and once on its twin with the same settings; the stations, and
+so the spatial split, are identical. Compare on the SAME rows: `--stage report --run-id <twin run> --baseline <clean run>` scores only
+the rows both have. Scoring the twin on its own rows would flatter it, because the kept pre-installation readings follow the network
+median closely and are easy to predict. `python -m preprocessing.combine_dataset --only-clean` skips the twins.
+
+Each folder has `combined_hourly.csv` (station, coordinates, `network`, cleaned PM2.5, hour encoding) and the per-sensor files plus
+`locations.csv` that the pipeline reads. To train on a range, set `sensor_locations_csv` to its `locations.csv` and `sensor_csv_dir`
+to its `sensors/` folder in `configs/data.yaml`, then re-run `preprocess`. The two networks read differently where both operate
+(median hourly network mean 13.2 against 17.2 µg/m³) and cannot be calibrated against each other, so the values are left as measured.
+
 ### 2.2 Check the install
 
 ```bash
 python -m pytest tests -q
 ```
 
-Expect `313 passed` (and 4 skipped, which only apply when `contextily` is not installed) in about a minute. If something fails here, fix it before running anything else.
+Expect `331 passed` (and 4 skipped, which only apply when `contextily` is not installed) in about a minute. If something fails here, fix it before running anything else.
 
 ### 2.3 First run: the whole pipeline on the data folder
 
@@ -868,7 +895,7 @@ State these when reporting results.
 
 ## 6. How it was checked
 
-`python -m pytest tests -q` runs 317 tests, 313 of which apply when `contextily` is installed (about 1 min), covering: configuration and the CRS check; the reset command; the infer / geocp workflow; the coverage check; the QC data conversion and the `qcdata_` loader; progress, hang detection and timeouts (also for the tune stage); the accuracy report and the snapshot layout, the map outline switch and the smooth band edges; shared-patch training; shapes and
+`python -m pytest tests -q` runs 335 tests, 331 of which apply when `contextily` is installed (about 1 min), covering: configuration and the CRS check; the reset command; the infer / geocp workflow; the coverage check; the QC data conversion and the `qcdata_` loader; progress, hang detection and timeouts (also for the tune stage); the accuracy report and the snapshot layout, the map outline switch and the smooth band edges; shared-patch training; shapes and
 gradient flow into both branches (pool and flatten); trainer and checkpoint round trips; metrics against
 hand-computed values; gap capping; patch/window alignment checked by hand; partitioning; the spatial lag
 (hand-computed, leakage, per-fold); scalers; GeoCP (normalisation, clipping, Table 4.2 metrics, zones, grid

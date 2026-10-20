@@ -55,6 +55,11 @@ Train with tuned values:                      --stage train --tuned
    A coverage check runs first: sensors outside the raster are skipped, which crops the study area, so they are
    listed (the Tunasan station in Muntinlupa is 2.3 km south of the raster) and data.coverage.strict can stop the run.
    Set data.paths.boundary to the NCR boundary to measure the missing area exactly.
+0b. A cleaned, combined copy of both networks exists (python -m preprocessing.combine_dataset -> data/Combined Dataset/, with the
+   full record and two ranges that drop 2021-2022 and 2021-2023). It removes empty, <=0.5 ug/m3, >1000, New Year window, QC
+   pre-installation and lone-spike readings (each listed in excluded_readings.csv) and writes per-sensor files the loader reads
+   unchanged; data.yaml points at one range's locations.csv and sensors/ folder to use it. Each range also has a *_with_preinstall
+   twin that keeps the QC pre-installation readings, so that rule can be run as an experiment (compare both on the same rows).
 1. Per-sensor CSVs are read for sensors inside the raster extent and put on a strict hourly index.
 2. Gaps up to 24 hours are linearly interpolated; longer gaps stay entirely empty. (pandas'
    limit= would fill the first 24 hours of a long gap, so gaps are measured first and then masked.)
