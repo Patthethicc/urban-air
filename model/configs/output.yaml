@@ -10,8 +10,18 @@ aqi:
     - {label: "Unhealthy for sensitive groups", upper: 45, color: "#ff7e00"}
     - {label: "Very unhealthy", upper: 55, color: "#ff0000"}
     - {label: "Acutely unhealthy / emergency", upper: null, color: "#8f3f97"}
-highlight_threshold: 35   # ug/m3: cells above it are outlined on every snapshot map
-daily_guideline: 50       # ug/m3: 24-hour National Ambient Air Quality Guideline Value, used on the daily mean
+highlight_threshold: 35   # ug/m3: the limit reported in output_summary.json (cells and share above it); drawn as a black outline only if
+                          # outline_above_threshold is true
+daily_guideline: 50       # ug/m3: 24-hour National Ambient Air Quality Guideline Value, the same for the daily mean
+smooth_maps: true            # true (default): the PNG maps interpolate a coarse grid onto a finer one before colouring, so the edges
+                          #   between AQI bands are smooth curves, not squares. DISPLAY ONLY: GeoTIFFs and the summary numbers keep the raw
+                          #   per-cell values. false = draw every cell as a flat square.
+smooth_sigma_cells: 0.8   # a gentle Gaussian blur (in source cells) that removes cell-to-cell speckle before interpolating, so the band
+                          #   edges are clean curves. 0 = interpolate only (edges follow the speckle). Larger = smoother but blurs small features
+smooth_target_px: 1600    # a grid with fewer cells than this along its longest side is upsampled towards it (a full 10 m grid is not)
+outline_above_threshold: false   # true = draw a black line around cells above the threshold on the maps (35 on the hourly maps and
+                                 # panels, 50 on the daily mean). false (default): no outline, the AQI colours alone mark the bands.
+                                 # Per run: --override output.outline_above_threshold=true
 basemap:                  # background of the PNG maps (never the GeoTIFFs). Independent switches:
   enabled: true           #   master switch. false = plain background on every map
   web_tiles: true         #   source 1: web tiles via contextily (needs the library AND internet).

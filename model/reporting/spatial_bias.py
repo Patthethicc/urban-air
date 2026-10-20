@@ -16,6 +16,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from reporting.layout import snap_file
+
 QUADRANT = {1: "High-High", 2: "Low-High", 3: "Low-Low", 4: "High-Low"}
 CLUSTERS = ["High-High", "Low-Low", "High-Low", "Low-High", "Not significant"]
 
@@ -153,7 +155,7 @@ def run_spatial_bias(run_id: str, cfg: dict) -> dict:
 
     if len(cells) < int(b["min_cells"]) or cells["mean_residual"].nunique() < 2:
         summary["skipped"] = f"fewer than {b['min_cells']} grid cells (or constant residuals); Moran's I not meaningful"
-        write_json(snap / "spatial_bias.json", summary)
+        write_json(snap_file(snap, "spatial_bias.json", write=True), summary)
         update_run_info(run_dir, spatial_bias=summary)
         return summary
 
@@ -171,12 +173,12 @@ def run_spatial_bias(run_id: str, cfg: dict) -> dict:
         _, _, _, _, size = cell_geometry(cells["cx"], cells["cy"], raster, b["cell_size_m"])
         names = band_names_for(raster, cfg)
         summary["band_profile"] = band_profile(cells, cell_band_means(raster, cells["cx"], cells["cy"], size), names)
-        plotters.plot_lisa_on_bands(raster, cells, names, str(snap / "lisa_on_bands.png"))
+        plotters.plot_lisa_on_bands(raster, cells, names, str(snap_file(snap, "lisa_on_bands.png", write=True)))
     else:
         summary["note"] = "global Moran's I not significant: no spatial clustering of residuals, LISA not run"
 
-    cells.to_csv(snap / "residuals_by_cell.csv", index=False)
-    plotters.plot_lisa_map(cells, glob, str(snap / "lisa_map.png"))
-    write_json(snap / "spatial_bias.json", summary)
+    cells.to_csv(snap_file(snap, "residuals_by_cell.csv", write=True), index=False)
+    plotters.plot_lisa_map(cells, glob, str(snap_file(snap, "lisa_map.png", write=True)))
+    write_json(snap_file(snap, "spatial_bias.json", write=True), summary)
     update_run_info(run_dir, spatial_bias={k: v for k, v in summary.items() if k != "band_profile"})
     return summary

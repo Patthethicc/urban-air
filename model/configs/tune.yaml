@@ -27,7 +27,8 @@ epochs_space: {type: integer, low: 5, high: 25}     # used when search_epochs: t
 space:
   # global
   learning_rate: {type: real, low: 1.0e-4, high: 1.0e-2, prior: log-uniform}
-  batch_size: {type: integer, low: 16, high: 128}
+  batch_size: {type: integer, low: 128, high: 512}     # centred on 256 (the geometric mean). Not 16-128: on the 10 m data a batch costs
+                                                       # the same at any size, so small batches are 3-8x slower per epoch for no gain
   # spatial (CNN)
   cnn_kernel_size: {type: categorical, values: [3, 5, 7]}
   cnn_filters: {type: integer, low: 8, high: 48}       # first layer; deeper layers double it

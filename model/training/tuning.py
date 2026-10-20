@@ -16,6 +16,7 @@ Inside every fold the spatial lag is recomputed from that fold's fit stations on
 (training/fold_features.py). Calibration and test stations are never touched.
 `train --tuned` then trains with the result.
 """
+import inspect
 import json
 import time
 from copy import deepcopy
@@ -28,6 +29,8 @@ from torch.utils.data import Subset
 from networks.dual_branch_net import DualBranchNet
 from preprocessing.scalers import Scalers
 from preprocessing.spatial_partitioner import nested_spatial_folds, spatial_cv_folds
+import runtime_guard
+from runtime_guard import format_duration
 from seed import set_seed
 from training.dataset import AirQualityDataset, load_meta
 from training.fold_features import SpatialLagRecomputer
@@ -136,26 +139,45 @@ def apply_tuned(cfg: dict, ref: str) -> dict:
 
 
 # ------------------------------------------------------------------ the search
-def gp_search(objective, space_cfg: dict, tune_cfg: dict, log_path: Path | None = None, tag: str = "") -> dict:
+_PACE_PENDING = [True]                   # the "at this pace ..." projection is printed once per tuning run
+
+
+def gp_search(objective, space_cfg: dict, tune_cfg: dict, log_path: Path | None = None, tag: str = "",
+              searches: int = 1) -> dict:
     """Run skopt.gp_minimize on objective(hp) -> (loss, details). Every trial is logged (and written to
-    log_path as it happens, so an interrupted search keeps what it learned)."""
+    log_path as it happens, so an interrupted search keeps what it learned).
+
+    An objective that takes a `label` argument is told which trial it runs ("[outer 0] trial 3/12"), so its progress
+    lines can say where they are. `searches` = how many searches the whole tuning run has (for the one-off projection
+    printed after the very first trial)."""
     from skopt import gp_minimize
     from skopt.utils import use_named_args
 
     dims = build_space(space_cfg)
     n_calls = int(tune_cfg["n_calls"])
+    takes_label = "label" in inspect.signature(objective).parameters
     trials: list[dict] = []
 
     @use_named_args(dims)
     def wrapped(**kw):
         hp = {k: to_native(v) for k, v in kw.items()}
+        label = f"{tag} trial {len(trials) + 1}/{n_calls}".strip()
         t0 = time.time()
-        loss, details = objective(hp)
+        loss, details = objective(hp, label=label) if takes_label else objective(hp)
         loss = float(loss) if np.isfinite(loss) else 1e3          # a diverged model must not break the GP
+        took = time.time() - t0
         trials.append({"trial": len(trials) + 1, "loss": loss, "hyperparameters": hp,
-                       "seconds": round(time.time() - t0, 1), **details})
+                       "seconds": round(took, 1), **details})
         best = min(t["loss"] for t in trials)
-        print(f"{tag} trial {len(trials):2d}/{n_calls}  loss {loss:.4f}  best {best:.4f}  {hp}")
+        left = (n_calls - len(trials)) * float(np.mean([t["seconds"] for t in trials]))
+        remaining = f", about {format_duration(left)} left in this search" if left > 0 else ""
+        print(f"{label}  loss {loss:.4f}  best {best:.4f}  took {format_duration(took)}{remaining}  {hp}", flush=True)
+        if _PACE_PENDING[0]:
+            _PACE_PENDING[0] = False
+            one_search = n_calls * took
+            print(f"  at this pace one search of {n_calls} trials takes about {format_duration(one_search)}, "
+                  f"{searches} search{'es' if searches > 1 else ''} about {format_duration(searches * one_search)} "
+                  "(the evaluation fits on all rows come on top)", flush=True)
         if log_path is not None:
             write_json(log_path, {"tag": tag, "trials": trials})
         return loss
@@ -181,7 +203,7 @@ def make_objective(cfg: dict, dataset, folds, stride: int, seed: int, recomputer
     t = cfg["tune"]
     searched = bool(t.get("search_epochs"))
 
-    def objective(hp: dict):
+    def objective(hp: dict, label: str = ""):
         c = apply_hyperparameters(cfg, hp)
         if searched:
             tc = {**c["train"], "early_stopping": False}               # epochs comes from hp
@@ -193,12 +215,16 @@ def make_objective(cfg: dict, dataset, folds, stride: int, seed: int, recomputer
             set_seed(seed + k)
             ds, fit, val = recomputer.apply(dataset, fit, val)
             trainer = Trainer(DualBranchNet(c["model"]), tc, c["model"], "")
+            fit_tag = f"{label} fit {k + 1}/{len(folds)}".strip()
+            t_fit = time.time()
             hist = trainer.fit(make_loader(Subset(ds, fit[::stride]), tc, True),
                                make_loader(Subset(ds, val[::stride]), tc, False),
-                               epochs=tc["epochs"], verbose=False)
+                               epochs=tc["epochs"], verbose=False, tag=fit_tag)
             losses.append(hist["val_loss"][-1] if searched else hist["best_val_loss"])
             best_epochs.append(hist["best_epoch"])
             ran.append(hist["epochs_run"])
+            print(f"  {fit_tag}: {hist['epochs_run']} epochs (best {hist['best_epoch']}), val loss {losses[-1]:.4f}, "
+                  f"{format_duration(time.time() - t_fit)}", flush=True)
         details = {"fold_losses": [float(x) for x in losses], "best_epochs": best_epochs, "epochs_run": ran}
         if not searched:
             details["suggested_epochs"] = max(1, int(round(float(np.mean(best_epochs)))))
@@ -219,20 +245,35 @@ def nested_tuning(cfg: dict) -> Path:
     scalers = Scalers.load(str(Path(processed) / "scalers.json"))
     recomputer = SpatialLagRecomputer(cfg)
     stride, seed = int(t["row_stride"]), int(t["random_state"])
+    nested = bool(t["nested_evaluation"])
+    searches = (int(t["outer_folds"]) if nested else 0) + 1
+    fits = searches * int(t["n_calls"]) * int(t["inner_folds"])
+    _PACE_PENDING[0] = True
+    status = runtime_guard.status_every_s()
+    print(f"tuning plan: {searches} search{'es' if searches > 1 else ''} x {t['n_calls']} trials x {t['inner_folds']} inner fits"
+          f" = {fits} fits on {'all rows' if stride == 1 else f'every {stride}th row'}"
+          + (f", plus {t['outer_folds']} evaluation fits on all rows of the outer-training stations" if nested else "")
+          + ". Output: a line per finished fit and trial"
+          + (f", and a 'still running' line every {format_duration(status)}" if status else ""), flush=True)
 
     outer_results = []
-    if t["nested_evaluation"]:
+    if nested:
         for k, (fit, test, inner) in enumerate(nested_spatial_folds(meta, t["outer_folds"], t["inner_folds"])):
-            print(f"--- outer fold {k}: {len(set(meta.iloc[test]['location_id']))} held-out stations")
+            print(f"--- outer fold {k} (search {k + 1}/{searches}): "
+                  f"{len(set(meta.iloc[test]['location_id']))} held-out stations", flush=True)
             res = gp_search(make_objective(cfg, dataset, inner, stride, seed + 100 * k, recomputer),
-                            effective_space(t), t, tune_dir / f"search_outer_{k}.json", tag=f"[outer {k}]")
+                            effective_space(t), t, tune_dir / f"search_outer_{k}.json", tag=f"[outer {k}]",
+                            searches=searches)
             hp = res["best_hyperparameters"]
             c = apply_hyperparameters(cfg, hp)
             tc = {**c["train"], "early_stopping": False}          # fixed epoch count: no validation set here
             set_seed(seed + 100 * k)
             ds, fit_ok, test_ok = recomputer.apply(dataset, fit, test)   # lag from the outer-fit stations only
             trainer = Trainer(DualBranchNet(c["model"]), tc, c["model"], "")
-            trainer.fit(make_loader(Subset(ds, fit_ok), tc, True), None, epochs=tc["epochs"], verbose=False)
+            print(f"[outer {k}] evaluation fit with the winning hyperparameters: {len(fit_ok):,} rows, "
+                  f"{tc['epochs']} epochs", flush=True)
+            trainer.fit(make_loader(Subset(ds, fit_ok), tc, True), None, epochs=tc["epochs"], verbose=True,
+                        tag=f"[outer {k}] evaluation fit")           # all rows: the same progress lines as training
             _, y_true, y_pred = trainer.evaluate(make_loader(Subset(ds, test_ok), tc, False))
             metrics = compute_all(scalers.inverse_y(y_true), scalers.inverse_y(y_pred))
             outer_results.append({
@@ -244,9 +285,9 @@ def nested_tuning(cfg: dict) -> Path:
             })
             print(f"[outer {k}] tuned model on held-out stations: RMSE {metrics['rmse']:.3f}  MAE {metrics['mae']:.3f}")
 
-    print("--- final search over all training stations")
+    print(f"--- final search over all training stations (search {searches}/{searches})", flush=True)
     final = gp_search(make_objective(cfg, dataset, spatial_cv_folds(meta, t["inner_folds"]), stride, seed, recomputer),
-                      effective_space(t), t, tune_dir / "search_final.json", tag="[final]")
+                      effective_space(t), t, tune_dir / "search_final.json", tag="[final]", searches=searches)
     write_json(tune_dir / "best_hyperparameters.json",
                {"hyperparameters": final["best_hyperparameters"], "inner_cv_loss": final["best_loss"],
                 "epochs_mode": "searched" if t["search_epochs"] else "early_stopping",

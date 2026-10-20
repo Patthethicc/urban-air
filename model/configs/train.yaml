@@ -1,7 +1,11 @@
 seed: 42
 device: auto            # auto | cpu | cuda
 epochs: 50              # upper bound per fit; early stopping usually ends sooner
-batch_size: 64
+batch_size: 256        # was 64. Measured on the 10 m data (one CV fold epoch, 555k rows): 64 -> 18.6 min, 256 -> 5.8 min, 1024 -> 1.6 min;
+                       # a batch costs about the same at any size (only ~50 distinct station patches per batch), so bigger = faster.
+                       # One tuning-style fit (every 8th row, lr 1e-3) per size: best validation RMSE 6.42 ug/m3 at epoch 2 with 256
+                       # (early stop at 6) and 6.46 at epoch 2 with 64; both then got worse. No quality difference seen, but that is
+                       # a single fold and learning rate, not proof that 256 is optimal; tune.yaml searches 128-512.
 num_workers: 0
 optimizer:
   name: adam            # adam | adamw
@@ -14,3 +18,14 @@ grad_clip: 1.0
 cv:
   enabled: true         # spatial k-fold on the training stations; fold best epochs set the final epoch count
 final_epochs: null      # override the epoch count of the final fit (null = mean best epoch of the folds)
+runtime:                # progress, hang detection, time budget (runtime_guard.py); a slow run is fine, a hung one is not
+  progress_every_s: 30  # print a progress line inside long passes at least this often (0 = quiet)
+  status_every_s: 300   # fits that print nothing per epoch (the tune stage) give one 'still running, at trial/fit/epoch ...'
+                        # line this often (0 = none)
+  stall_timeout_s: 600  # a loop that finishes NO batch for this long is a hang -> stops with exit code 124 (0 = off).
+                        # Measured on the 10 m data: a batch takes 0.1-0.2 s (any batch size), an inference chunk <15 s,
+                        # so 10 minutes never trips on slow-but-healthy work. Raise it only for huge batch_size / chunk_cells.
+  hard_exit_grace_s: 60 # if Python cannot be interrupted (stuck in native code), the process is ended this much later
+  max_hours: null       # optional wall-clock limit for one command (checked after every batch); null = none. Not set by
+                        # default: a legitimate CPU run is many hours, and the first epoch prints the projected total
+  warn_hours: 2         # the first epoch warns when the projected run is longer than this

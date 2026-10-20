@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from preprocessing.spatial_lag import nearest_station_weights
+from runtime_guard import format_duration, guarded  # format_duration is also imported from here by older callers
 
 
 def padded_raster(raster_path: str, patch_px: int):
@@ -38,12 +39,13 @@ def gather_patches(padded: np.ndarray, rows: np.ndarray, cols: np.ndarray, patch
 
 
 def standin_series(values: np.ndarray, column_ids, ref_ids, ref_xy: np.ndarray, cell_xy: np.ndarray,
-                   hour_idx: np.ndarray, cfg: dict) -> np.ndarray:
+                   hour_idx: np.ndarray, cfg: dict, neighbours=None) -> np.ndarray:
     """Spatial lag of every cell at the given hours: [len(hour_idx), n_cells], NaN where none of the
-    cell's k nearest reference stations reported. `values` [H, S] hourly PM2.5, columns = `column_ids`."""
+    cell's k nearest reference stations reported. `values` [H, S] hourly PM2.5, columns = `column_ids`.
+    `neighbours` = (idx, w) from nearest_station_weights for these cells, when already computed."""
     col = {int(c): i for i, c in enumerate(column_ids)}
     ref_cols = np.array([col[int(r)] for r in ref_ids])
-    idx, w = nearest_station_weights(cell_xy, ref_xy, cfg)                       # [n, k]
+    idx, w = neighbours if neighbours is not None else nearest_station_weights(cell_xy, ref_xy, cfg)   # [n, k]
     vals = values[np.ix_(hour_idx, ref_cols)][:, idx].astype(float)             # [h, n, k]
     seen = ~np.isnan(vals)
     num = (np.where(seen, vals, 0.0) * w[None]).sum(axis=-1)
@@ -52,18 +54,27 @@ def standin_series(values: np.ndarray, column_ids, ref_ids, ref_xy: np.ndarray, 
         return np.where(den > 0, num / den, np.nan)
 
 
-def cell_temporal_features(values, column_ids, ref_ids, ref_xy, cell_xy, t_idx: int, timestamp: pd.Timestamp,
-                           cfg: dict) -> np.ndarray:
-    """Raw (unscaled) X_temporal [n_cells, T, F] for the hour `timestamp` (index t_idx of the hourly matrix),
-    in the F-order of data.yaml: [pm25, (spatial_lag), (roll_mean, roll_std), (sin_hour, cos_hour)]."""
+def _first_history_hour(t_idx: int, cfg: dict) -> int:
+    """Index of the earliest hourly row the features of hour `t_idx` read (lags plus the rolling window)."""
     lags = cfg["data"]["temporal"]["lags"]
-    names = cfg["derived"]["feature_names"]
     w = cfg["data"]["temporal"].get("rolling_window") or 1
     first = t_idx - max(lags) - (w - 1)
     if first < 0:
         raise ValueError(f"not enough history before this hour (need {max(lags) + w - 1} hours)")
+    return first
+
+
+def cell_temporal_features(values, column_ids, ref_ids, ref_xy, cell_xy, t_idx: int, timestamp: pd.Timestamp,
+                           cfg: dict, neighbours=None) -> np.ndarray:
+    """Raw (unscaled) X_temporal [n_cells, T, F] for the hour `timestamp` (index t_idx of the hourly matrix),
+    in the F-order of data.yaml: [pm25, (spatial_lag), (roll_mean, roll_std), (sin_hour, cos_hour)].
+    `neighbours`: see standin_series."""
+    lags = cfg["data"]["temporal"]["lags"]
+    names = cfg["derived"]["feature_names"]
+    w = cfg["data"]["temporal"].get("rolling_window") or 1
+    first = _first_history_hour(t_idx, cfg)
     hours = np.arange(first, t_idx)
-    series = standin_series(values, column_ids, ref_ids, ref_xy, cell_xy, hours, cfg)    # [h, n]
+    series = standin_series(values, column_ids, ref_ids, ref_xy, cell_xy, hours, cfg, neighbours)    # [h, n]
 
     steps = []
     for lag in lags:
@@ -85,17 +96,49 @@ def cell_temporal_features(values, column_ids, ref_ids, ref_xy, cell_xy, t_idx: 
     return np.stack(steps, axis=1).astype(np.float32)                        # [n, T, F]
 
 
+def _hour_index(timestamp: pd.Timestamp, hourly: dict, cfg: dict) -> int:
+    """Row of `timestamp` in the hourly matrix, checked BEFORE any work: enough history before it, and its lag hours
+    inside the data (the features read rows first .. t_idx - 1)."""
+    step = pd.Timedelta(cfg["data"]["time"]["freq"])
+    t_idx = int(round((timestamp - hourly["start"]) / step))
+    _first_history_hour(t_idx, cfg)
+    n_hours = len(hourly["values"])
+    if t_idx > n_hours:
+        last = hourly["start"] + (n_hours - 1) * step
+        raise ValueError(f"{timestamp} is after the hourly readings (last reading {last}): no lag history for it")
+    return t_idx
+
+
+def _supports_reuse(model) -> bool:
+    """True when the CNN embedding can be computed once and reused for every hour: a dual-branch model with its CNN
+    on. A temporal-only model or anything with only forward(spatial, temporal) takes the plain path."""
+    import torch
+
+    return bool(getattr(model, "use_spatial", False)) and all(
+        isinstance(getattr(model, name, None), torch.nn.Module) for name in ("spatial", "temporal", "head"))
+
+
 def predict_surface(model, scalers, padded: np.ndarray, shape, transform, hourly: dict, ref_ids, ref_xy,
-                    timestamp: pd.Timestamp, cfg: dict, device: str = "cpu"):
-    """Point prediction (ug/m3) for the cells of the raster. Returns (prediction [rows, cols] float32 with
-    NaN where no stand-in history exists, output transform).
+                    timestamps, cfg: dict, device: str = "cpu", *, reuse_embeddings: bool = True):
+    """Point predictions (ug/m3) for the cells of the raster at one or several hours. Returns (prediction, output
+    transform): [rows, cols] float32 for a single timestamp, [n_timestamps, rows, cols] for a sequence; NaN where no
+    stand-in history exists.
+
+    A cell's patch, and so its CNN embedding, is the same for every hour: each chunk computes the neighbours, the patches
+    and the embedding once and reuses them for all hours (`reuse_embeddings`; same result as one forward pass per hour,
+    which is what a temporal-only or forward-only model gets).
 
     hourly = {'values': [H, S], 'location_ids': [S], 'start': Timestamp}."""
+    import time
+
     import torch
     from affine import Affine
 
-    from affine_compat import compose
-    from rasterio.transform import xy as cell_xy_of
+    from affine_compat import cell_centers, compose
+
+    single = isinstance(timestamps, (str, pd.Timestamp))
+    stamps = [pd.Timestamp(t) for t in ([timestamps] if single else timestamps)]
+    t_idx = [_hour_index(ts, hourly, cfg) for ts in stamps]                    # fail fast, before any chunk
 
     inf = cfg["inference"]
     stride, px = int(inf["stride_px"]), int(cfg["derived"]["patch_px"])
@@ -105,30 +148,54 @@ def predict_surface(model, scalers, padded: np.ndarray, shape, transform, hourly
     cols_1d = np.arange(c0 + stride // 2, c1, stride)
     rr, cc = np.meshgrid(rows_1d, cols_1d, indexing="ij")
     rows, cols = rr.ravel(), cc.ravel()
-    xs, ys = cell_xy_of(transform, rows, cols, offset="center")
+    xs, ys = cell_centers(transform, rows, cols)
     cell_xy = np.column_stack([xs, ys])
 
-    t_idx = int(round((timestamp - hourly["start"]) / pd.Timedelta(cfg["data"]["time"]["freq"])))
-    out = np.full(len(rows), np.nan, dtype=np.float32)
+    out = np.full((len(stamps), len(rows)), np.nan, dtype=np.float32)
     model = model.to(device).eval()
+    reuse = reuse_embeddings and _supports_reuse(model)
     chunk = int(inf["chunk_cells"])
-    with torch.no_grad():
-        for a in range(0, len(rows), chunk):
+    total, started, next_mark = len(rows), time.time(), 0.05
+    n_chunks = int(np.ceil(total / chunk))
+    across = f"across {len(stamps)} snapshot{'s' if len(stamps) > 1 else ''}"
+    show = bool(inf.get("progress", True)) and total >= 50_000
+    with torch.no_grad(), guarded("per-cell inference") as guard:
+        for i, a in enumerate(range(0, total, chunk), 1):
+            guard.beat(f"chunk {i}/{n_chunks}, cells {a:,}-{min(a + chunk, total):,} of {total:,} {across}")
             sl = slice(a, a + chunk)
-            raw = cell_temporal_features(hourly["values"], hourly["location_ids"], ref_ids, ref_xy,
-                                         cell_xy[sl], t_idx, timestamp, cfg)
-            ok = ~np.isnan(raw).any(axis=(1, 2))
-            if not ok.any():
-                continue
-            patches = scalers.transform_patches(gather_patches(padded, rows[sl][ok], cols[sl][ok], px))
-            temporal = scalers.transform_temporal(raw[ok])
-            pred = model(torch.from_numpy(patches).to(device), torch.from_numpy(temporal).to(device))
-            idx = np.flatnonzero(ok) + a
-            out[idx] = scalers.inverse_y(pred.cpu().numpy()).ravel().astype(np.float32)
+            neighbours = nearest_station_weights(cell_xy[sl], ref_xy, cfg)
+            raw = [cell_temporal_features(hourly["values"], hourly["location_ids"], ref_ids, ref_xy, cell_xy[sl], ti, ts,
+                                          cfg, neighbours) for ti, ts in zip(t_idx, stamps)]
+            ok = np.stack([~np.isnan(r).any(axis=(1, 2)) for r in raw])                      # [hours, n]
+            union = ok.any(axis=0)
+            if union.any():
+                patches = torch.from_numpy(scalers.transform_patches(
+                    gather_patches(padded, rows[sl][union], cols[sl][union], px))).to(device)
+                embedding = model.spatial(patches, dedupe=model.dedupe_patches) if reuse else None
+                for h, ok_h in enumerate(ok):
+                    if not ok_h.any():
+                        continue
+                    sel = torch.from_numpy(ok_h[union]).to(device)
+                    temporal = torch.from_numpy(scalers.transform_temporal(raw[h][ok_h])).to(device)
+                    pred = (model.head(embedding[sel], model.temporal(temporal)) if reuse
+                            else model(patches[sel], temporal))
+                    out[h, a + np.flatnonzero(ok_h)] = scalers.inverse_y(pred.cpu().numpy()).ravel()
+            if show:
+                done, elapsed = min(a + chunk, total), time.time() - started
+                rate, frac = done / elapsed, done / total
+                if a == 0 and total / rate > 300:
+                    print(f"    {total:,} cells to predict {across}; at ~{rate:,.0f} cells/s this takes about "
+                          f"{format_duration(total / rate)} (use --override inference.stride_px=5 or an "
+                          "inference.window for a faster look)")
+                if frac >= next_mark:
+                    print(f"    {frac:5.1%}  chunk {i}/{n_chunks} {across}  elapsed {format_duration(elapsed)}  "
+                          f"remaining ~{format_duration(elapsed / frac * (1 - frac))}")
+                    next_mark += 0.05
 
     shape_out = (len(rows_1d), len(cols_1d))
     new_transform = compose(transform, Affine.translation(c0, r0), Affine.scale(stride))   # works on affine 2.x and 3.x
-    return out.reshape(shape_out), new_transform
+    out = out.reshape((len(stamps),) + shape_out)
+    return (out[0] if single else out), new_transform
 
 
 def write_prediction_raster(prediction: np.ndarray, transform, crs, path: str) -> str:

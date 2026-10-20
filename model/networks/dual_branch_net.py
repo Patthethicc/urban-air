@@ -18,10 +18,13 @@ class DualBranchNet(nn.Module):
         self.temporal = TemporalLSTM(t["input_size"], t["hidden_size"], t["num_layers"], t["dropout"])
         in_dim = (self.spatial.output_dim if self.use_spatial else 0) + self.temporal.output_dim
         self.head = FusionHead(in_dim, f["hidden_dims"], f["dropout"], f["out_dim"])
+        # Training / prediction over station samples repeat each station's static patch: compute it once per batch
+        # (exact, see SpatialCNN.forward). Off by default; the Trainer and predict_partition switch it on.
+        self.dedupe_patches = False
 
     def forward(self, x_spatial: torch.Tensor, x_temporal: torch.Tensor) -> torch.Tensor:
         """x_spatial [B,C,H,W], x_temporal [B,T,F] -> [B,1]"""
-        spatial = self.spatial(x_spatial) if self.use_spatial else None
+        spatial = self.spatial(x_spatial, dedupe=self.dedupe_patches) if self.use_spatial else None
         return self.head(spatial, self.temporal(x_temporal))
 
     def parameter_counts(self) -> dict:

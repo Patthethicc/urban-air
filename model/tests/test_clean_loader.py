@@ -10,3 +10,4 @@ def test_short_gaps_are_interpolated_and_long_gaps_stay_empty():
     assert out.iloc[1:4].tolist() == [2.0, 3.0, 4.0]          # 3-hour gap bridged linearly
     assert out.iloc[5:35].isna().all()                          # 30-hour gap: NOT partly filled
     assert out.iloc[0] == 1.0 and out.iloc[-1] == 40.0
+

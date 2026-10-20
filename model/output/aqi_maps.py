@@ -1,6 +1,6 @@
 """Prediction surfaces as maps on the Philippine AQI scale (Output.txt).
 
-Cells above the highlight threshold (35 ug/m3) are outlined. A basemap of the NCR is drawn when
+Cells above the highlight threshold (35 ug/m3) are outlined only when output.outline_above_threshold is true (off by default). A basemap of the NCR is drawn when
 `contextily` is installed (output.yaml basemap: auto); otherwise the map keeps a plain background.
 """
 import warnings
@@ -11,6 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from matplotlib.colors import ListedColormap  # noqa: E402
+from scipy import ndimage  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
@@ -32,6 +33,48 @@ def extent_of(transform, shape) -> tuple:
     return left, left + transform.a * shape[1], top + transform.e * shape[0], top
 
 
+def display_grid(values: np.ndarray, cfg: dict) -> np.ndarray:
+    """The grid actually drawn. With output.smooth_maps (default true) a coarse grid is interpolated onto a finer one
+    (bicubic spline, within the range of the data) BEFORE the AQI colours are assigned, so the edges between colour
+    bands run as smooth curves instead of staircases of squares. Cells without a prediction stay empty. This is display
+    only: the GeoTIFFs and the numbers in output_summary.json keep the raw per-cell values.
+
+    A grid that already has about `smooth_target_px` cells along its longest side (or more) is drawn as it is."""
+    o = cfg["output"]
+    values = np.asarray(values, dtype=np.float64)
+    if not o.get("smooth_maps", True) or values.ndim != 2:
+        return values
+    valid = np.isfinite(values)
+    if valid.sum() < 4:
+        return values
+    target = int(o.get("smooth_target_px", 1600))
+    cap = int(np.sqrt(float(o.get("smooth_max_cells", 6_000_000)) / values.size))            # keep the drawn grid affordable
+    k = min(int(np.ceil(target / max(values.shape))), cap)
+    if k <= 1:
+        return values
+    lo, hi = float(values[valid].min()), float(values[valid].max())
+    if hi > lo:
+        fill = values
+        if not valid.all():                                          # empty cells take their nearest value for the spline only
+            nearest = ndimage.distance_transform_edt(~valid, return_distances=False, return_indices=True)
+            fill = values[tuple(nearest)]
+        sigma = float(o.get("smooth_sigma_cells", 0.0))
+        if sigma > 0:                                                # optional: soften cell-to-cell speckle before interpolating
+            fill = ndimage.gaussian_filter(fill, sigma, mode="nearest")
+        up = np.clip(ndimage.zoom(fill, k, order=3, mode="nearest", grid_mode=True), lo, hi)
+    else:
+        up = np.full((values.shape[0] * k, values.shape[1] * k), lo)
+    if not valid.all():
+        keep = ndimage.zoom(valid.astype(np.float64), k, order=1, mode="nearest", grid_mode=True) >= 0.5
+        up = np.where(keep, up, np.nan)
+    return up
+
+
+def _outline_on(cfg: dict) -> bool:
+    """The black line between 'below' and 'above' the threshold is an option, off by default."""
+    return bool(cfg["output"].get("outline_above_threshold", False))
+
+
 def _legend_entries(cfg: dict, threshold, threshold_label: str):
     bins = cfg["output"]["aqi"]["bins"]
     lo, handles = 0, []
@@ -39,7 +82,7 @@ def _legend_entries(cfg: dict, threshold, threshold_label: str):
         rng = f">{lo:g}" if b["upper"] is None else f"{lo:g}-{b['upper']:g}"
         handles.append(Patch(facecolor=b["color"], edgecolor=INK2, linewidth=0.5, label=f"{b['label']} ({rng})"))
         lo = b["upper"]
-    if threshold is not None:
+    if threshold is not None and _outline_on(cfg):
         handles.append(Line2D([0], [0], color=INK, linewidth=1.2, label=threshold_label))
     if _STATE["last"] == "vectors":                              # name the offline basemap layers that were drawn
         paths = cfg["data"]["paths"]
@@ -286,7 +329,8 @@ def _add_basemap(ax, crs, cfg: dict):
 
 
 def draw_surface(ax, values: np.ndarray, transform, crs, cfg: dict, threshold=None, stations=None, title=None):
-    """One snapshot on `ax`: AQI-coloured cells, outline of cells above `threshold`, optional stations."""
+    """One snapshot on `ax`: AQI-coloured cells, optional outline of cells above `threshold`
+    (output.outline_above_threshold), optional stations."""
     bins = cfg["output"]["aqi"]["bins"]
     left, right, bottom, top = extent = extent_of(transform, values.shape)
     ax.set_xlim(left, right)
@@ -294,14 +338,15 @@ def draw_surface(ax, values: np.ndarray, transform, crs, cfg: dict, threshold=No
     based = _add_basemap(ax, crs, cfg) == "web"                  # tiles are busy: let them show through the cells
 
     cmap = ListedColormap([b["color"] for b in bins]).with_extremes(bad=(0, 0, 0, 0))
-    ax.imshow(np.ma.masked_invalid(categorize(values, cfg)), extent=extent, origin="upper", cmap=cmap,
+    shown = display_grid(values, cfg)                            # smoothed (or the raw cells), same area either way
+    ax.imshow(np.ma.masked_invalid(categorize(shown, cfg)), extent=extent, origin="upper", cmap=cmap,
               vmin=-0.5, vmax=len(bins) - 0.5, interpolation="nearest", alpha=0.72 if based else 1.0, zorder=2)
 
-    if threshold is not None:
-        above = np.where(np.isfinite(values), values > threshold, False)
+    if threshold is not None and _outline_on(cfg):
+        above = np.where(np.isfinite(shown), shown > threshold, False)
         if above.any() and not above.all():
-            xs = left + (np.arange(values.shape[1]) + 0.5) * transform.a
-            ys = top + (np.arange(values.shape[0]) + 0.5) * transform.e
+            xs = left + (np.arange(shown.shape[1]) + 0.5) * (right - left) / shown.shape[1]
+            ys = top - (np.arange(shown.shape[0]) + 0.5) * (top - bottom) / shown.shape[0]
             ax.contour(xs, ys, above.astype(float), levels=[0.5], colors=[INK], linewidths=1.1, zorder=4)
     if stations is not None and len(stations):
         ax.scatter(stations["x"], stations["y"], s=14, c=SURFACE, edgecolors=INK, linewidths=0.8, zorder=5)

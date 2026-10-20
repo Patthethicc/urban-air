@@ -13,26 +13,13 @@ def load_sensor_locations(cfg: dict) -> pd.DataFrame:
     """Sensors inside the Master GeoTIFF extent, with projected x/y (EPSG:32651).
 
     Uses the gpkg when paths.sensors_gpkg is set, otherwise the lat/lon CSV."""
-    import geopandas as gpd
     import rasterio
+
+    from preprocessing.coverage import all_sensor_locations
 
     d = cfg["data"]
     c = d["columns"]
-    if d["paths"]["sensors_gpkg"]:
-        gdf = gpd.read_file(d["paths"]["sensors_gpkg"]).to_crs(d["crs"])
-    else:
-        raw = pd.read_csv(d["paths"]["sensor_locations_csv"])
-        gdf = gpd.GeoDataFrame(
-            raw[[c["group"]]],
-            geometry=gpd.points_from_xy(raw[c["lon"]], raw[c["lat"]]),
-            crs="EPSG:4326",
-        ).to_crs(d["crs"])
-
-    out = pd.DataFrame({
-        c["group"]: gdf[c["group"]].astype("int64").to_numpy(),
-        c["x"]: gdf.geometry.x.to_numpy(),
-        c["y"]: gdf.geometry.y.to_numpy(),
-    }).drop_duplicates(c["group"])
+    out = all_sensor_locations(cfg)[[c["group"], c["x"], c["y"]]]       # sensors outside are skipped; see preprocessing/coverage.py
 
     with rasterio.open(d["paths"]["master_raster"]) as src:
         b = src.bounds
@@ -40,9 +27,22 @@ def load_sensor_locations(cfg: dict) -> pd.DataFrame:
     return out.loc[inside].reset_index(drop=True)
 
 
+FILE_PREFIXES = ("openaq", "qcdata")       # openaq_<id>_*.csv (OpenAQ) and qcdata_<id>_*.csv (Quezon City network, qc_convert.py)
+
+
+def find_sensor_file(dirs, sid: int):
+    """The CSV of one sensor: openaq_<sid>_*.csv or qcdata_<sid>_*.csv, searched recursively in each directory."""
+    for folder in ([dirs] if isinstance(dirs, str) else dirs):
+        for prefix in FILE_PREFIXES:
+            files = sorted(glob.glob(os.path.join(folder, "**", f"{prefix}_{sid}_*.csv"), recursive=True))
+            if files:
+                return files[0]
+    return None
+
+
 def load_raw_readings(cfg: dict) -> pd.DataFrame:
-    """Read every openaq_<location_id>_*.csv in paths.sensor_csv_dir for sensors inside the raster
-    extent. Columns: group, timestamp, target, x, y. Out-of-range values become NaN."""
+    """Read every openaq_<location_id>_*.csv / qcdata_<location_id>_*.csv in paths.sensor_csv_dir for sensors
+    inside the raster extent. Columns: group, timestamp, target, x, y. Out-of-range values become NaN."""
     d = cfg["data"]
     c = d["columns"]
     g, ts, tg, xc, yc = c["group"], c["timestamp"], c["target"], c["x"], c["y"]
@@ -51,11 +51,11 @@ def load_raw_readings(cfg: dict) -> pd.DataFrame:
     frames = []
     for _, sensor in load_sensor_locations(cfg).iterrows():
         sid = int(sensor[g])
-        files = glob.glob(os.path.join(d["paths"]["sensor_csv_dir"], "**", f"openaq_{sid}_*.csv"), recursive=True)
-        if not files:
+        file = find_sensor_file(d["paths"]["sensor_csv_dir"], sid)
+        if file is None:
             print(f"  warning: no CSV for sensor {sid}, skipped")
             continue
-        raw = pd.read_csv(files[0], usecols=[ts, tg])
+        raw = pd.read_csv(file, usecols=[ts, tg])
         stamp = pd.to_datetime(raw[ts], utc=True).dt.tz_convert(d["timezone"]).dt.tz_localize(None)
         value = pd.to_numeric(raw[tg], errors="coerce")
         value = value.where(value.between(lo, hi))

@@ -1,20 +1,26 @@
 # Raw inputs and preprocessing settings (see Preprocessing.txt, sections 4.2.1 / 4.2.5)
 # Relative paths are resolved from the model/ folder by config_parser.
 paths:
-  master_raster: ../pilot testing/CNN-LSTM/master_morphology_stack_500m.tif   # swap for the 10 m stack
+  # Inputs live in the repo's data/ folder (paths are relative to model/).
+  master_raster: ../data/Morphology/master_raster_v2.tif   # 10 m, EPSG:32651, 5 bands (see raster: below)
   sensors_gpkg: null            # OpenAQ_Sensors.gpkg; when null the lat/lon CSV below is used
-  sensor_locations_csv: ../pilot testing/CNN-LSTM/OpenAQ Sensor Locations - OpenAQ Sensor Locations.csv
-  sensor_csv_dir: ../pilot testing/CNN-LSTM/Air Data    # one openaq_<location_id>*.csv per sensor
+  sensor_locations_csv: [../data/OpenAQ/OpenAQ Sensor Locations - OpenAQ Sensor Locations.csv, ../data/QC Data Converted/QC Sensor Locations.csv]
+  sensor_csv_dir: [../data/OpenAQ, ../data/QC Data Converted]    # one openaq_<location_id>_*.csv or qcdata_<location_id>_*.csv per sensor, searched recursively
+  # Quezon City network (data/QC Data): run `python preprocessing/qc_convert.py` once (writes data/QC Data Converted/).
+  # To use it, point the two sensor paths above at it, or make each a list to use OpenAQ and QC together:
+  #   sensor_locations_csv: [../data/OpenAQ/OpenAQ Sensor Locations - OpenAQ Sensor Locations.csv, ../data/QC Data Converted/QC Sensor Locations.csv]
+  #   sensor_csv_dir: [../data/OpenAQ, ../data/QC Data Converted]
   processed_dir: processed
   checkpoints_dir: checkpoints
   snapshots_dir: snapshots
   tuning_dir: tuning
-  # inputs of the one-off `rasters` stage (not needed for the pilot raster)
+  # inputs of the one-off `rasters` stage (not needed: master_raster_v2.tif is already built)
   buildings_csv: null           # Google Open Buildings, WKT geometry column
   streets: null                 # OSM road centerlines (gpkg / shp / geojson)
   height_raster: null           # 4 m building height
   ndvi_raster: null             # 10 m Sentinel-2 NDVI
-  boundary: null                # NCR study boundary polygon
+  boundary: null                # NCR boundary polygon (gpkg / shp / geojson). Optional but recommended: with it the
+                                # coverage check measures how much of the NCR the raster really covers
   raster_work_dir: processed/rasters
 
 # ---- Coordinate reference system ---------------------------------------------------------------
@@ -22,6 +28,13 @@ paths:
 # and the rasters and maps written by `infer` (they inherit the raster's CRS). WGS 84 / UTM zone 51N.
 # It must be PROJECTED in metres (planar distances in m); the raster's CRS is checked against it.
 crs: EPSG:32651
+# ---- Coverage of the NCR -------------------------------------------------------------------------
+# A sensor outside the Master GeoTIFF is skipped, which silently crops the study area. `preprocess` (and
+# `--stage coverage`) therefore report which sensors are outside the raster and, if paths.boundary is set, how much of
+# the NCR boundary the raster covers. strict: true stops preprocess when coverage is incomplete.
+coverage:
+  strict: false
+
 timezone: Asia/Manila           # local_timestamp is parsed to naive local time
 
 columns:

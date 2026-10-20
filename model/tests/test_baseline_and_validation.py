@@ -79,7 +79,7 @@ def test_changed_lags_patch_or_scalers_are_caught(cfg, tmp_path):
     with pytest.raises(ValueError, match="lags"):
         check_compatibility(ckpt, processed)
 
-    processed = _processed(tmp_path, {**cfg["derived"], "patch_px": 32}, [3, 2, 1])
+    processed = _processed(tmp_path, {**cfg["derived"], "patch_px": cfg["derived"]["patch_px"] + 1}, [3, 2, 1])
     with pytest.raises(ValueError, match="patch_px"):
         check_compatibility(ckpt, processed)
 

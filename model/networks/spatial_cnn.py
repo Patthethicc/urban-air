@@ -32,9 +32,23 @@ class SpatialCNN(nn.Module):
         self.project = nn.Sequential(nn.Linear(flat, embed_dim), nn.ReLU(), nn.Dropout(dropout))
         self.output_dim = embed_dim
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _features(self, x: torch.Tensor) -> torch.Tensor:
+        """conv blocks -> reduce -> flatten (before the linear layer)."""
         x = self.conv(x)
         if self.feature_map == "flatten" and x.shape[-2:] != (self.patch_px, self.patch_px):
             raise ValueError(f"patch is {tuple(x.shape[-2:])} but the model was built for "
                              f"{self.patch_px}x{self.patch_px}; rebuild with the right patch_px")
-        return self.project(self.reduce(x).flatten(1))
+        return self.reduce(x).flatten(1)
+
+    def forward(self, x: torch.Tensor, dedupe: bool = False) -> torch.Tensor:
+        """`dedupe`: a patch is static per station, so a training batch repeats the same few patches many times. With
+        dedupe each DISTINCT patch goes through the conv blocks and the linear layer once and the result is looked up
+        per row; the dropout is then applied per row. Same output and same gradients as the plain path (the gradient of
+        a shared patch is the sum over its rows), much less work when rows share patches."""
+        if dedupe and x.shape[0] > 1:
+            unique, inverse = torch.unique(x.flatten(1), dim=0, return_inverse=True)
+            if unique.shape[0] < x.shape[0]:
+                linear, relu, dropout = self.project
+                shared = relu(linear(self._features(unique.view(-1, *x.shape[1:]))))
+                return dropout(shared[inverse])
+        return self.project(self._features(x))

@@ -11,5 +11,11 @@ lag_reference: train    # train = neighbours are the proper-training stations (w
                         #         calibration saw); all = every station with data
 stride_px: 1            # predict every Nth pixel in each direction (must be odd). 1 = every cell.
                         # A 10 m raster of the whole NCR has ~10^7 cells: raise this or use `window` for a first look.
-chunk_cells: 4096       # cells per forward pass
+chunk_cells: 1024       # cells per forward pass. Measured on the 10 m raster (32 x 32 patches): the CNN needs ~1.2 GB extra RAM
+                        # at 1024 and ~5.1 GB at 4096, and 1024 is not slower per cell. Every chunk serves all hours of a date.
+progress: true          # print an estimate after the first chunk and progress lines for big grids
+                        # Speed on a 4-thread CPU: roughly 300-800 cells/s depending on load. The full raster at stride 1
+                        # (10.6 million cells) is therefore 4-10 HOURS per snapshot. stride_px 5 (50 m cells, 425 k cells)
+                        # is ~10-25 min, 11 is ~2-5 min, 21 (210 m cells, 24 k cells) is ~1 min. A GPU is much faster.
+                        # The first chunk prints a time estimate before the long part starts.
 window: null            # optional [row_start, row_stop, col_start, col_stop] in raster pixels

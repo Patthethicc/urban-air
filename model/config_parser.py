@@ -30,10 +30,15 @@ def feature_base_names(data_cfg: dict) -> list[str]:
 
 
 def _resolve_paths(data_cfg: dict) -> None:
+    def absolute(value: str) -> str:
+        p = Path(value)
+        return str(p if p.is_absolute() else (MODEL_DIR / p).resolve())
+
     for key, value in data_cfg["paths"].items():
         if isinstance(value, str):
-            p = Path(value)
-            data_cfg["paths"][key] = str(p if p.is_absolute() else (MODEL_DIR / p).resolve())
+            data_cfg["paths"][key] = absolute(value)
+        elif isinstance(value, list):                       # sensor_locations_csv / sensor_csv_dir may list several
+            data_cfg["paths"][key] = [absolute(v) for v in value]
 
 
 def derive(cfg: dict) -> dict:

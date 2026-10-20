@@ -14,10 +14,12 @@ What you get from one run:
 - for any day: four snapshot surfaces (08:00, 12:00, 17:00, 21:00) with intervals, a 24-hour mean, and maps on
   the Philippine AQI scale; Grad-CAM saliency of the CNN on the hottest and coldest cells.
 
-> **Status.** Developed against the 500 m *pilot* raster and 18 pilot stations. The pipeline runs end to end
-> and 204 tests pass, but the pilot numbers in this file only show that the wiring works: the CNN sees 1×1-pixel
-> patches there, and the example runs train for a few epochs. The real 10 m raster, real training budgets and
-> the rasters stage on real source files have not been run (see [Known limits](#5-known-limits)).
+> **Status.** Runs on the real data in the repo's `data/` folder: a 10 m Master GeoTIFF (EPSG:32651, 5 bands,
+> 27 × 39 km) and the OpenAQ sensors (44 stations with readings, 2024-08-13 to 2026-10-15). The pipeline runs end to
+> end and 313 tests pass. The numbers quoted in this file come from short smoke runs (2 epochs), so they show that the
+> wiring works, not what the model can reach. Three things to know before relying on results: the raster stops short of
+> the southern tip of the NCR ([2.14](#214-covering-the-whole-ncr)), a full-resolution city map takes hours on a CPU
+> ([2.6](#26-make-the-maps)), and the pipeline has not been trained to convergence on this data yet.
 
 ## Contents
 
@@ -37,13 +39,16 @@ What you get from one run:
 cd model
 pip install -r requirements.txt
 python -m pytest tests -q
-python run_pipeline.py --stage all --override train.epochs=3 --override train.batch_size=256
-python run_pipeline.py --stage infer --date 2026-04-11
+python run_pipeline.py --stage coverage
+python run_pipeline.py --stage all --override train.epochs=2 --override train.batch_size=256
+python run_pipeline.py --stage infer --date 2026-04-11 --override inference.stride_px=21
 ```
 
-The `all` line runs the pilot data through preprocessing, training, GeoCP, the bias check and the report in
-about a minute on a CPU (3 epochs; the defaults train much longer). Results are in
-`snapshots/<run_id>/` and the maps in `snapshots/<run_id>/surface/20260411/maps/`.
+`coverage` checks in a second that the raster covers your sensors. The `all` line runs the data through
+preprocessing, training, GeoCP, the bias check and the report in about 10 minutes on a CPU (2 epochs; the defaults
+train much longer). The `infer` line maps the whole raster at a coarse 210 m grid in about 2 minutes; the full 10 m
+grid takes hours (see [2.6](#26-make-the-maps)). Results are in `snapshots/<run_id>/` and the maps in
+`snapshots/<run_id>/surface/20260411/maps/`.
 
 ---
 
@@ -58,15 +63,59 @@ about a minute on a CPU (3 epochs; the defaults train much longer). Results are 
 - Optional: `contextily` for web-tile basemaps on the maps (see [2.6](#26-make-the-maps)).
 - **Run every command from inside the `model/` folder.**
 
-The pilot data is already referenced by `configs/data.yaml`, with paths relative to `model/`:
+The data in the repo's `data/` folder is already referenced by `configs/data.yaml`, with paths relative to `model/`:
 
 | What | Where |
 |---|---|
-| Hourly PM2.5 per sensor | `../pilot testing/CNN-LSTM/Air Data/openaq_<id>_*.csv` (45 sensors) |
-| Sensor coordinates | `../pilot testing/CNN-LSTM/OpenAQ Sensor Locations - OpenAQ Sensor Locations.csv` |
-| Master GeoTIFF (500 m pilot, UTM 51N) | `../pilot testing/CNN-LSTM/master_morphology_stack_500m.tif` |
+| Hourly PM2.5 per sensor | `../data/OpenAQ/openaq_<id>_*.csv` (45 files, 44 stations have readings) |
+| Sensor coordinates | `../data/OpenAQ/OpenAQ Sensor Locations - OpenAQ Sensor Locations.csv` (46 sensors) |
+| Master GeoTIFF | `../data/Morphology/master_raster_v2.tif`: 10 m, EPSG:32651, 3897 × 2729 pixels, 5 bands: `building_height_mean`, `building_height_stddev` (σH), `ndvi_mean`, `building_density`, `street_aspect_ratio_mean` |
+| Quezon City network (optional) | `../data/QC Data/`: one wide table per year, converted to per-sensor files by `qc_convert.py`, see [2.1b](#21b-the-quezon-city-sensors-qc-data) |
 
-Only 18 of the 45 sensors fall inside the pilot raster; the rest are skipped automatically.
+45 of the 46 sensors fall inside the raster. The Tunasan station (Muntinlupa) lies 2.3 km beyond its southern edge
+and is skipped, and sensor 4797655 has no data file. `python run_pipeline.py --stage coverage` shows this at any
+time ([2.14](#214-covering-the-whole-ncr)). The older 500 m pilot files in `pilot testing/` are no longer referenced.
+
+### 2.1b The Quezon City sensors (QC data)
+
+`data/QC Data/` holds 40 low-cost sensors in Quezon City, hourly from July 2021 (`AQ_Sensors_Hourly_<year>.csv`, one
+column per sensor, local time) and their locations (`QCDATA_SensorLoc.csv`). The loader reads one file per sensor, so
+convert them once:
+
+```bash
+python preprocessing/qc_convert.py
+```
+
+This writes `data/QC Data Converted/`: one `qcdata_<location_id>_<name>.csv` per site with the OpenAQ columns
+(`location_name, location_id, sensor_id, utc_timestamp, local_timestamp, pm25_value, parameter, unit`) and
+`QC Sensor Locations.csv` (`name, location_id, latitude, longitude`). The loader accepts `qcdata_` files exactly like
+`openaq_` files. The raw files are never changed.
+
+- **Ids:** `location_id` is `9000000` + the site number (1-40), so it cannot collide with an OpenAQ id; `sensor_id` repeats it
+  (the network has no sensor ids).
+- **Which column is which site:** the hourly columns are short codes (`Nova_Market`, `QCGH`, ...) and the site table has
+  full names, so `configs/qc_column_map.csv` pairs them (each pairing is by name; for 18 of the 20 sites installed up to Nov 2022
+  the first reading is one day after the listed installation date, which agrees; sites 3 and 4 report earlier). `Commonwealth_BH` and
+  `Commonwealth_BHall` are the same sensor under two column names: they become one series, `Commonwealth_BHall` first
+  and `Commonwealth_BH` filling the hours it is empty (2685 hours report in both, mean difference 6.7 µg/m³).
+- **Time:** the QC timestamps have no time zone; they are treated as Asia/Manila (`--timezone` changes it).
+- **Values** are not altered (only empty hours and the table's `AVERAGE` row are dropped). The network has 174 negative
+  readings and 176 above 1000 µg/m³, which `data.clean` (0-1000) turns into gaps when loading.
+- **Check this before training:** the 2024 sites (ids 21-40) report from 2024-01-01, up to 85 days before their listed
+  installation dates. In that stretch they follow the median of the other sites at r = 0.97 (0.77 afterwards), more closely
+  than independent sensors would, so those hours look backfilled and could flatter the spatial lag. `python
+  preprocessing/qc_convert.py --trim-before-install` drops everything before the listed date (off by default).
+
+To use the QC sensors, point `configs/data.yaml` at them, alone or together with OpenAQ (each of the two sensor paths may
+be a list):
+
+```yaml
+sensor_locations_csv: [../data/OpenAQ/OpenAQ Sensor Locations - OpenAQ Sensor Locations.csv, ../data/QC Data Converted/QC Sensor Locations.csv]
+sensor_csv_dir: [../data/OpenAQ, ../data/QC Data Converted]
+```
+
+All 40 sites lie inside the raster, so `--stage coverage` reports them as covered. They are all in Quezon City and the
+stations are randomly split, so adding them makes the sensor network much denser there than elsewhere in the NCR.
 
 ### 2.2 Check the install
 
@@ -74,38 +123,42 @@ Only 18 of the 45 sensors fall inside the pilot raster; the rest are skipped aut
 python -m pytest tests -q
 ```
 
-Expect `204 passed` (and 4 skipped, which only apply when `contextily` is not installed) in about a minute. If something fails here, fix it before running anything else.
+Expect `313 passed` (and 4 skipped, which only apply when `contextily` is not installed) in about a minute. If something fails here, fix it before running anything else.
 
-### 2.3 First run: the whole pipeline on the pilot data
+### 2.3 First run: the whole pipeline on the data folder
 
 ```bash
-python run_pipeline.py --stage all --override train.epochs=3 --override train.batch_size=256
+python run_pipeline.py --stage all --override train.epochs=2 --override train.batch_size=256
 ```
 
 `--override section.key=value` changes one setting for this run only; here it makes training short. Without
 the overrides the defaults apply (up to 50 epochs, batch 64), which takes many times longer on a CPU.
 
-What you should see (abridged; numbers will differ a little between runs):
+What you should see (abridged; numbers differ a little between runs):
 
 ```
-stations per partition: {'train': 11, 'calibration': 3, 'test': 4}
-windows: X_temporal (157333, 3, 4), y (157333, 1)
-[fold 0] held-out stations RMSE 5.2  MAE 3.0  ...
-final fit on all training stations for 3 epochs
-run 20261013_122820 saved to checkpoints/20261013_122820
+Master GeoTIFF: 27.3 x 39.0 km at 10 m, EPSG:32651, lon 120.900..121.150 E, lat 14.398..14.752 N
+Sensors inside the raster: 45 of 46
+  OUTSIDE (skipped): Barangay Tunasan - Maharlika Highway (SM Center Muntinlupa) (4797656) ...: 2.3 km beyond the south edge
+COVERAGE: INCOMPLETE: part of the study area is cropped away
+stations per partition: {'train': 28, 'calibration': 7, 'test': 9}
+windows: X_temporal (463848, 3, 4), y (463848, 1)
+[fold 0] held-out stations RMSE 5.8  MAE 3.5
+final fit on all training stations for 1 epochs
+run 20261015_221114 saved to checkpoints/20261015_221114
 GeoCP config: {'kernel': 'gaussian', 'bandwidth_m': inf, 'alpha': 0.1, ...}
-test coverage 0.829 (target 0.90), mean width 13.09 ug/m3, median 13.15
-spatial bias: Moran's I -0.080 (p 0.784, 11 cells); LISA not run
-snapshot written to snapshots/20261013_122820
+test coverage 0.872 (target 0.90), mean width 13.36 ug/m3, median 13.67
+spatial bias: Moran's I 0.220 (p 0.054, 28 cells); LISA not run
+snapshot written to snapshots/20261015_221114
 ```
 
-That took about 70 seconds on the machine used for this tutorial. Three folders were created, one per kind of
-output:
+That took about 10 minutes on the machine used for this tutorial (preprocessing 10 s, training about 9 minutes, the
+rest under a minute). Three folders were created, one per kind of output:
 
 ```
 processed/                 the arrays the model trains on (patches, windows, scalers, partition)
 checkpoints/<run_id>/      the model, the settings it used, per-fold models, learning curves
-snapshots/<run_id>/        metrics, intervals, plots, bias analysis
+snapshots/<run_id>/        SUMMARY.md (read first), plots/, tables/, data/ (accuracy, intervals, bias analysis)
 ```
 
 ### 2.4 The same thing, one stage at a time
@@ -116,9 +169,9 @@ Run these to redo or inspect a single step. Each stage reads what the previous o
 |---|---|---|---|
 | preprocess | `--stage preprocess` | clean hourly series, split stations into train / calibration / test, spatial lag, windows, patches, scaling | `processed/` |
 | train | `--stage train` | spatial cross-validation on the training stations, then the final fit | `checkpoints/<run_id>/` |
-| geocp | `--stage geocp` | predicts calibration and test stations, picks the GeoCP setting, builds intervals | `predictions_*.csv`, `geocp.json`, `calibration_table.csv` |
-| bias | `--stage bias` | Moran's I and LISA on the out-of-fold residuals | `spatial_bias.json`, `lisa_*.png` |
-| report | `--stage report` | metrics summary and plots (runs `geocp` and `bias` first if missing) | `metrics_summary.json`, `*.png` |
+| geocp | `--stage geocp` | predicts calibration and test stations, picks the GeoCP setting, builds intervals | `data/predictions_*.csv`, `data/geocp.json`, `data/calibration_table.csv` |
+| bias | `--stage bias` | Moran's I and LISA on the out-of-fold residuals | `data/spatial_bias.json`, `plots/lisa_*.png` |
+| report | `--stage report` | accuracy report and plots; prints the headline (runs `geocp` and `bias` first if missing) | `SUMMARY.md`, `metrics_summary.json`, `plots/`, `tables/` |
 | infer | `--stage infer --date D` | a prediction and interval for every raster cell, four snapshots a day (runs `geocp` first if it has not been run) | `surface/<D>/` |
 | explain | `--stage explain --timestamp "D HH:MM"` | Grad-CAM on the hottest and coldest cells | `explain/<D_HHMM>/` |
 | tune | `--stage tune` | Bayesian hyperparameter search with nested spatial CV (slow) | `tuning/<id>/` |
@@ -129,24 +182,68 @@ Stages that act on a trained run take `--run-id <id>`; without it they use the l
 
 ### 2.5 Reading the results
 
-Open `snapshots/<run_id>/metrics_summary.json`:
+When `train` ends it prints a **training summary**: the data sizes, the model, and the cross-validation accuracy fold by
+fold (RMSE, MAE, R², with mean ± sd). That is validation accuracy. The accuracy on the stations the model never saw comes
+from `report` (also the last step of `--stage all`), which prints a short headline and writes **`snapshots/<run_id>/SUMMARY.md`**.
+Open that file first; it is organised for reading, not for parsing:
+
+| Section | Answers |
+|---|---|
+| 1. Headline | R², RMSE, MAE, bias, share of predictions within ±5 and ±10 µg/m³, share in the right AQI band, and the interval coverage, each with a plain-language meaning |
+| 2. Is that good? | the model next to two simple rules: repeat the previous hour (persistence) and always predict the average level, with the skill against persistence |
+| 3. Does it hold across the splits? | cross-validation, calibration and test side by side |
+| 4. By station | every test station, largest error first, with its interval coverage (and `plots/accuracy_by_station.png`) |
+| 5. Uncertainty | which GeoCP weighting was chosen, coverage against target, interval width, close to versus far from a calibration sensor |
+| 6. Spatial bias | Moran's I of the residuals in one sentence |
+| 7. Training | the folds and the final fit |
+| 8. Read with care | automatic warnings: a short run, few test stations, intervals under target, no better than persistence, unverified AQI limits |
+| 9. Files | what every file in the folder is |
+
+How to read the accuracy numbers:
+
+- **R², RMSE, MAE** are the three metrics of Validation.txt, on test stations never used for fitting, tuning or calibration.
+  RMSE punishes large misses; MAE is the average error; R² is the share of variation explained (0 = no better than the
+  average level).
+- **Bias** is the mean of predicted − observed: negative means the model under-predicts on average.
+- **Within ±X µg/m³** and **same AQI band** are the plain-language versions. The AQI figure must be read against the
+  *guess-the-most-common-band* score printed beside it, because most hours are in the lowest band.
+- **Persistence** repeats the previous hour at the same station. It is only possible where a station has history, which
+  the model does not need, so it is a yardstick, not a rival.
+
+The folder:
+
+```
+snapshots/<run_id>/
+    SUMMARY.md             read this first
+    metrics_summary.json   every number, machine-readable (old keys kept; the new ones are under "accuracy")
+    run_info.json          settings and provenance
+    plots/                 loss_curve  pred_vs_obs  residual_hist  timeseries_sample  accuracy_by_station  geocp_coverage  lisa_map ...
+    tables/                accuracy_summary.csv  accuracy_by_station.csv  cv_folds.csv     (open in a spreadsheet)
+    data/                  predictions_test.csv  predictions_calibration.csv  calibration_table.csv  geocp.json  spatial_bias.json ...
+    surface/  explain/     from `infer` and `explain`
+```
+
+Snapshots made before this layout kept every file in the top folder; they still work (re-run `--stage report` to get
+`SUMMARY.md` for them). Settings: `report.accuracy` in `configs/report.yaml` (the tolerances, the AQI-band share, the
+persistence yardstick).
+
+`metrics_summary.json` in detail:
 
 - **`test`**: RMSE and MAE in µg/m³ and R², on stations that were never used for fitting, tuning or
-  calibration. Example from the pilot: RMSE 6.89, MAE 4.12, R² 0.67. `supplementary` holds Willmott's IA and
+  calibration. Example from a 2-epoch run: RMSE 5.75, MAE 3.43, R² 0.75 on 91,157 rows from 9 unseen stations. `supplementary` holds Willmott's IA and
   Pearson r.
 - **`cv_folds`**: the same metrics for each cross-validation fold of the training stations (held-out stations
   per fold). These should be in the same range as `test`; a big gap points at a lucky or unlucky split.
-- **`geocp.test`**: `coverage` should be close to `target_coverage` (0.90). On the pilot it is 0.83, which is
-  below target because only three stations calibrate the intervals. `mean_width` / `median_width` are in µg/m³;
+- **`accuracy`**: `measures` (the extended figures per split), `yardsticks` (persistence and the average-level rule) and
+  `by_station`.
+- **`geocp.test`**: `coverage` should be close to `target_coverage` (0.90). In the same run it is 0.87,
+  below target because only seven stations calibrate the intervals. `mean_width` / `median_width` are in µg/m³;
   `coverage_urban_core` and `coverage_peripheral` split the test stations by distance to the nearest
   calibration sensor.
 - **`spatial_bias`**: `global_moran.p_sim` under 0.05 means residuals cluster in space; then
-  `lisa_on_bands.png` shows where, laid over each morphology band. With few stations the test has little power.
+  `plots/lisa_on_bands.png` shows where, laid over each morphology band. With few stations the test has little power.
 - **`parameters`** and `run_info.json` (next to the model) list every setting used, so a run can always be
   reproduced. `checkpoints/runs_index.csv` compares all runs in one table.
-
-Plots in the same folder: `loss_curve.png`, `pred_vs_obs.png`, `residual_hist.png`, `timeseries_sample.png`,
-`geocp_coverage.png`, `lisa_map.png`.
 
 ### 2.6 Make the maps
 
@@ -154,12 +251,30 @@ Plots in the same folder: `loss_curve.png`, `pred_vs_obs.png`, `residual_hist.pn
 python run_pipeline.py --stage infer --date 2026-04-11
 ```
 
-`infer` needs the GeoCP calibration of the run; if it has not been computed yet (for example right after `train`), `infer` runs `--stage geocp` first and says so. It also needs hourly readings for the three hours before each snapshot. The pilot data covers 2024-08-13 12:00 to
-2026-07-03 22:00 (a median of 17 stations report in any hour). To check the range of your own data:
+`infer` needs the GeoCP calibration of the run; if it has not been computed yet (for example right after `train`), `infer` runs `--stage geocp` first and says so. It also needs hourly readings for the three hours before each snapshot. The data covers 2024-08-13 12:00 to
+2026-10-15 18:00 (44 stations). To check the range of your own data:
 
 ```bash
 python -c "import numpy as np, pandas as pd; z=np.load('processed/pm25_hourly.npz'); s=pd.Timestamp(str(z['start'])); print(s, s+pd.Timedelta(hours=len(z['values'])-1))"
 ```
+
+**How long a map takes.** `infer` predicts every cell of the raster: 10.6 million cells at the full 10 m grid. On a
+4-thread CPU the model does roughly 300-800 cells/s (it varies with load), so one full-resolution snapshot takes
+**4 to 10 hours**. A day of four snapshots costs much less than four times that: every chunk of cells computes its CNN
+embedding once and reuses it for all hours of the date (measured on a 202,500-cell window of the real raster: 315 s instead
+of 1,076 s for four hours, 3.4x faster, identical output), so a full-resolution day is roughly 4-5 hours on this CPU. The
+run prints an estimate after the first chunk and progress lines afterwards, so you know before the long part starts. Choose the grid with `inference.stride_px` (odd values):
+
+| `--override inference.stride_px=` | Grid | Cells | About, per snapshot |
+|---|---|---|---|
+| `21` | 210 m | 24 thousand | 1 minute |
+| `11` | 110 m | 88 thousand | 2-5 minutes |
+| `5` | 50 m | 425 thousand | 10-25 minutes |
+| `1` (default) | 10 m | 10.6 million | 4-10 hours |
+
+`inference.window: [row_start, row_stop, col_start, col_stop]` limits the map to a part of the raster. A GPU is much
+faster (`train.device: auto` uses it), but the installed PyTorch is the CPU-only build, so the laptop's GPU is not used yet.
+`inference.chunk_cells` (default 1024) bounds memory: the CNN needs about 1.2 GB at 1024 cells per chunk and 5.1 GB at 4096.
 
 `--date` expands to the four hours in `configs/inference.yaml` (`snapshot_hours: [8, 12, 17, 21]`);
 `--timestamp "2026-04-11 12:00"` (repeatable) gives explicit hours. Results go to
@@ -170,12 +285,26 @@ python -c "import numpy as np, pandas as pd; z=np.load('processed/pm25_hourly.np
 | `prediction_volume.tif` | one band per snapshot (band names are the hours) |
 | `lower_volume.tif`, `upper_volume.tif`, `width_volume.tif` | the GeoCP interval, same grid |
 | `prediction_daily_mean.tif` | 24-hour mean (a cell missing in any snapshot stays empty) |
-| `maps/aqi_0800.png` … `daily_panels.png`, `daily_mean.png` | AQI-coloured maps; cells above 35 µg/m³ outlined, the daily mean outlined at the 50 µg/m³ guideline |
+| `maps/aqi_0800.png` … `daily_panels.png`, `daily_mean.png` | AQI-coloured maps (no outline; `output.outline_above_threshold: true` draws one around cells above 35 µg/m³, and 50 µg/m³ on the daily mean) |
 | `output_summary.json` | share of cells per AQI category, above 35 and 50, mean interval width, which basemap was used |
 
+**Smooth band edges.** A coarse grid (for example `stride_px` 5 or 11) used to be drawn as a staircase of squares. The PNG maps
+now interpolate the grid onto a finer one before the AQI colours are assigned, so the edges between bands are smooth curves.
+The values are interpolated, never the colours, and the result stays within the range of the data. It is **display only**:
+the GeoTIFFs and the numbers in `output_summary.json` keep the raw per-cell values. Settings in `configs/output.yaml`:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `smooth_maps` | `true` | `false` draws every cell as a flat square again |
+| `smooth_sigma_cells` | `0.8` | a gentle blur, in source cells, that removes cell-to-cell speckle so the edges are clean; `0` interpolates only (edges follow the speckle); larger blurs small features |
+| `smooth_target_px` | `1600` | a grid with fewer cells than this along its longest side is upsampled towards it; a full 10 m grid is already finer and is drawn as it is |
+
+Per run: `--override output.smooth_maps=false`. Small features (a single hot cell) are softened by the blur, so use `smooth_sigma_cells=0` or
+`smooth_maps=false` when exact cells matter.
+
 **Basemap.** By default the maps try web tiles first, then offline street/boundary layers, then a plain
-background, and each step is skipped quietly if it is not available. The pilot has no street layer configured,
-so its maps have a plain background (`basemap used: none`). To get a real background:
+background, and each step is skipped quietly if it is not available. No street layer is configured by default,
+so the maps have a plain background (`basemap used: none`). To get a real background:
 
 - offline: set `data.paths.streets` and `data.paths.boundary` in `configs/data.yaml` (the same OSM / boundary
   files the rasters stage uses);
@@ -201,17 +330,10 @@ that needs no key (mind its usage policy). The key is sent as `?key=<key>` on th
 `xyzservices` definition of the CARTO providers (used by `contextily`) writes it; if your key's instructions say
 otherwise, give the whole tile URL in `output.basemap_url` with `${CARTO_API_KEY}` where the key goes.
 
-**Grad-CAM.** `python run_pipeline.py --stage explain --timestamp "2026-04-11 12:00"` needs patches of at least
-3 × 3 pixels. The 500 m pilot raster gives 1 × 1, so on the pilot it prints a message and skips. To try it
-anyway, widen the patch and pass the **same override to every stage** (the model and the data must agree):
-
-```bash
-python run_pipeline.py --stage preprocess --override data.patch.extent_m=2500
-python run_pipeline.py --stage train --override data.patch.extent_m=2500 --override train.epochs=3 --override train.batch_size=256
-python run_pipeline.py --stage geocp --override data.patch.extent_m=2500
-python run_pipeline.py --stage infer --override data.patch.extent_m=2500 --date 2026-04-11
-python run_pipeline.py --stage explain --override data.patch.extent_m=2500 --timestamp "2026-04-11 12:00"
-```
+**Grad-CAM.** `python run_pipeline.py --stage explain --timestamp "2026-04-11 12:00"` works on a snapshot made by
+`infer` for that date. It needs patches of at least 3 × 3 pixels (320 m / raster resolution), which the 10 m raster
+gives (32 × 32). It writes overlays for the highest- and lowest-predicted cells of the snapshot (`gradcam_hot_cells.png`,
+`gradcam_cold_cells.png`). Note that with a coarse `stride_px` the hot and cold cells are chosen from that coarse map.
 
 ### 2.7 Tune hyperparameters, then train with them
 
@@ -223,13 +345,28 @@ python run_pipeline.py --stage train --tuned
 ```
 
 The search (`configs/tune.yaml`) is a Gaussian-process Bayesian optimisation over learning rate, batch size,
-CNN kernel size and filters, LSTM size and recurrent dropout. It uses nested spatial cross-validation: inner
+CNN kernel size and filters, LSTM size and recurrent dropout (batch size is searched between 128 and 512, around the 256 default: on the 10 m data a batch costs the same at any size, so small batches only make every trial slower). It uses nested spatial cross-validation: inner
 folds guide the search, outer folds (held-out stations) score the tuned model. **It is slow**: every trial
 trains one model per inner fold. For a quick demonstration (about 3 minutes on the tutorial machine):
 
 ```bash
 python run_pipeline.py --stage tune --override tune.n_calls=3 --override tune.n_initial_points=2 --override tune.outer_folds=2 --override tune.inner_folds=2 --override tune.row_stride=40 --override tune.max_epochs=4 --override tune.patience=2
 ```
+
+**What it prints.** A search is hours long, so the stage reports where it is (format example, numbers illustrative):
+
+```
+tuning plan: 4 searches x 12 trials x 3 inner fits = 144 fits on every 8th row, plus 3 evaluation fits on all rows of the outer-training stations. Output: a line per finished fit and trial, and a 'still running' line every 5 min
+--- outer fold 0 (search 1/4): 18 held-out stations
+  [outer 0] trial 1/12 fit 1/3: 7 epochs (best 3), val loss 0.2201, 6 min
+  ... [outer 0] trial 1/12 fit 2/3 epoch 4/30, batch 120/271  (running for 9 min)
+[outer 0] trial 1/12  loss 0.2214  best 0.2214  took 19 min, about 3.5 h left in this search  {'learning_rate': 0.004, ...}
+  at this pace one search of 12 trials takes about 3.8 h, 4 searches about 15.2 h (the evaluation fits on all rows come on top)
+[outer 0] evaluation fit with the winning hyperparameters: 555,000 rows, 5 epochs
+[outer 0] evaluation fit: 8,669 batches, about 19 min for this pass ...
+```
+
+`train.runtime.status_every_s` (default 300) sets how often the `...` position line appears. The evaluation fits use all rows, so they print the same epoch lines as training. The projection after the first trial multiplies that trial's duration, so it is rough (trials differ with the batch size and the epochs they need).
 
 To fit a real budget lower `n_calls` (keep `n_initial_points` ≤ `n_calls`), raise `row_stride`, lower `outer_folds`, or set `nested_evaluation: false`. Epochs are
 not searched by default (early stopping decides); set `tune.search_epochs: true` to search them as a
@@ -257,7 +394,7 @@ python run_pipeline.py --stage report --run-id <full run id> --baseline <tempora
 
 `metrics_summary.json` then has `comparison_to_baseline` with `r2_gain`. The spatial lag still feeds the LSTM in
 both runs; for a strictly no-spatial-information baseline also pass `--override data.spatial_lag.enabled=false`
-and re-run `preprocess` first. (On the pilot the baseline is not worse, which is expected with 1×1 patches.)
+and re-run `preprocess` first.
 
 ### 2.9 The coordinate system
 
@@ -335,19 +472,60 @@ The switches most often wanted:
 | `KeyError: unknown config key` | typo in an `--override`. Keys are `file.key.subkey`, e.g. `train.epochs`, `data.temporal.lags` |
 | `infer` gives no cells / `not enough history` | the date is outside the data, or no station reported in the three hours before a snapshot. Check the range ([2.6](#26-make-the-maps)) |
 | `explain` says `prediction_volume.tif missing` | `explain` works on a snapshot made by `infer`; run `--stage infer --date …` for that date first |
-| `explain: patches are 1x1 …` | 500 m pilot raster. Use the 10 m raster or the 5 × 5 trial in [2.6](#26-make-the-maps) |
+| `explain: patches are 1x1 …` | the raster is too coarse for a patch of at least 3 × 3 pixels (320 m / resolution). Use a finer raster |
+| `infer` prints `... this snapshot takes about N h` | the grid is large. Use `--override inference.stride_px=5` (or 11, 21) or an `inference.window`, see [2.6](#26-make-the-maps) |
+| `COVERAGE: INCOMPLETE` | some sensors lie outside the Master GeoTIFF and are skipped, see [2.14](#214-covering-the-whole-ncr) |
 | `contextily is not installed` warning | optional. Install it, or ignore it, or set `output.basemap.web_tiles=false` to stop looking |
 | `CARTO basemap tiles need a free API key` | `CARTO_API_KEY` is empty. Put the key in `model/.env` ([2.6](#26-make-the-maps)) |
 | map tiles say `API KEY REQUIRED` | the key is missing, wrong or not accepted (CARTO answers an invalid key like no key). Fix it in `.env`, then delete `.tile_cache` so the watermarked tiles are not reused |
 | `ModuleNotFoundError: preprocessing` | you are not inside `model/` |
 | `spatial bias: fewer than 6 grid cells` | too few training stations for Moran's I; lower `report.bias.min_cells` knowingly or use more stations |
-| training is very slow | use `--override train.epochs=…`, a larger `train.batch_size`, a GPU, or for tuning a smaller `n_calls` / larger `row_stride` |
+| training prints nothing for many minutes | it is not frozen: an epoch is one long pass. The first epoch prints its length and the projected total, then a progress line every 30 s, see [2.12b](#212b-long-runs-progress-and-timeouts) |
+| `TIMEOUT in stage 'train': … no progress for 600 s` | a real hang was detected (exit code 124), see [2.12b](#212b-long-runs-progress-and-timeouts) |
+| training is very slow | a larger `train.batch_size` (the biggest lever, measured below), `--override train.epochs=…`, a GPU, or for tuning a smaller `n_calls` / larger `row_stride` |
+
+### 2.12b Long runs: progress and timeouts
+
+On a CPU one training epoch takes minutes to tens of minutes and, before, printed nothing until it ended, which looks like a
+freeze. Training now prints, from the first epoch:
+
+```
+[fold 0] epoch 1/50: 8,669 batches, about 19 min for this pass at the current speed; a progress line follows every 30 s
+WARNING: the whole run takes about 14.9 h if every fit stops after ~12 epochs (early stopping), at most 62 h. A larger train.batch_size shortens it ...
+[fold 0] epoch 1/50:  34.0%  2,940/8,669 batches  elapsed 6 min  remaining ~12 min
+```
+
+**Why it was slow, measured on the data folder with the QC sensors** (554,785 rows per fold, 4 CPU threads, one epoch of a CV fold):
+
+| `train.batch_size` | one epoch | note |
+|---|---|---|
+| 64 (the old default) | 18.6 min | a full run with 3 folds and the final fit is about 15 h |
+| 256 (**the default now**) | 5.8 min | about 5 h for the same run; what the earlier runs here used |
+| 1024 | 1.6 min | a batch costs almost the same at any size (each batch computes only its ~50 distinct station patches), so bigger batches are nearly free; the cost is fewer weight updates per epoch, which may need more epochs or a higher learning rate |
+
+**Timeouts** (`runtime:` in `configs/train.yaml`, implemented in `runtime_guard.py`). Only the *absence of progress* is an error;
+a slow run is not.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `stall_timeout_s` | 600 | a loop (training epoch, validation, prediction, per-cell inference) that finishes **no batch** for this long is a hang. One batch takes 0.1-0.2 s and an inference chunk under 15 s, so 10 minutes never trips on healthy work. `0` = off |
+| `hard_exit_grace_s` | 60 | a hang inside native code (a stuck torch operation, an unreadable page) cannot be interrupted from Python; after this much longer the process is ended with a traceback |
+| `max_hours` | `null` | optional wall-clock limit per command, checked after every batch. Off by default: a legitimate CPU run is many hours, so a cap would kill good work; the first epoch tells you the projected total instead |
+| `progress_every_s` | 30 | seconds between progress lines (`0` = quiet) |
+| `status_every_s` | 300 | fits that print nothing per epoch (the tune stage) give one `... [outer 0] trial 3/12 fit 2/3 epoch 4/30, batch 120/271` line this often (`0` = none) |
+| `warn_hours` | 2 | the first epoch prints `WARNING` when the projected run is longer |
+
+On a hang or an exceeded budget the command prints `TIMEOUT in stage '…': …` (with the epoch and batch where it stopped), exits
+with code **124** (the code GNU `timeout` uses, so scripts can test for it), and marks the unfinished run's `run_info.json` as
+`"status": "timed_out"` with the reason. Finished runs say `completed`; a run that is still `running` after the process is
+gone was killed from outside (closed terminal, power loss). A real Ctrl+C is not turned into a timeout. If you do raise
+`train.batch_size` or `inference.chunk_cells` a lot, check that one batch or chunk still finishes well inside `stall_timeout_s`.
 
 ### 2.13 Start over (reset)
 
 Everything the pipeline generates (trained models, prepared data, results, tuning) is kept in four folders. After
-trying the pilot data, clear them before using the real data, because a model, scalers or tuned hyperparameters from
-pilot data do not belong with the real one:
+trying some data, clear them before using other data, because a model, scalers or tuned hyperparameters made from
+one dataset do not belong with another:
 
 ```bash
 python run_pipeline.py --stage clean
@@ -364,13 +542,38 @@ second really deletes. (`reset` is an alias for `clean`.) Options:
 | `--include-tile-cache` | also delete the cached basemap tiles (`.tile_cache`) |
 
 What is protected: `configs/`, `.env` (and your API key), the code, and all input data (sensor CSVs, source rasters,
-the pilot raster) are never touched, and any folder outside `model/` is refused. The Master GeoTIFF built by
+the Master GeoTIFF) are never touched, and any folder outside `model/` is refused. The Master GeoTIFF built by
 `--stage rasters` is **kept by default**, because it is slow to rebuild. The folders stay, with their `.gitkeep`
 placeholders.
 
-To switch from the pilot to real data: `--stage clean --yes`, point `data.paths` at your real files, build the raster
-(`--stage rasters`), then `--stage all`. If you only want to retrain with other settings, you do not need a reset:
+To start over with different data: `--stage clean --yes`, point `data.paths` at the new files (and build a raster with
+`--stage rasters` if you do not have one), then `--stage all`. If you only want to retrain with other settings, you do not need a reset:
 every run is kept side by side in `checkpoints/` and compared in `runs_index.csv`.
+
+### 2.14 Covering the whole NCR
+
+A sensor outside the Master GeoTIFF is skipped, which silently crops the study area, so the pipeline checks and reports
+it. `python run_pipeline.py --stage coverage` (read-only, a second to run) and the start of every `preprocess` print:
+
+```
+Master GeoTIFF: 27.3 x 39.0 km at 10 m, EPSG:32651, lon 120.900..121.150 E, lat 14.398..14.752 N
+Sensors inside the raster: 45 of 46
+  OUTSIDE (skipped): Barangay Tunasan - Maharlika Highway (SM Center Muntinlupa) (4797656) ...: 2.3 km beyond the south edge
+COVERAGE: INCOMPLETE: part of the study area is cropped away
+```
+
+**What this means for the current data.** `master_raster_v2.tif` is a rectangle from 120.90 to 121.15 °E and from
+14.398 to 14.752 °N. Muntinlupa is part of the NCR and its Tunasan station sits 2.3 km south of that edge, so the
+raster does not reach the southern tip of the NCR. The pipeline cannot invent morphology data there: you need a raster
+that extends further south (and possibly north: check the northern part of Caloocan and Valenzuela as well).
+
+**To measure it properly,** set `data.paths.boundary` to the NCR boundary polygon (gpkg / shp / geojson). The report then
+also gives the share of the NCR area the raster covers and how many km are missing on each side.
+`data.coverage.strict: true` makes `preprocess` stop while coverage is incomplete.
+
+Two other facts about the raster: it is a plain rectangle with data everywhere (no nodata outside the NCR), so city
+maps also show Manila Bay and the neighbouring provinces; and far from any sensor a cell's prediction is mostly its
+nearest stations' values (the spatial-lag stand-in of [3.9](#39-city-wide-inference-and-maps)).
 
 ---
 
@@ -426,7 +629,7 @@ checkpoint --> infer (every raster cell, 4 snapshots/day) --> volumes + AQI maps
    `[PM2.5, spatial lag, sin(hour), cos(hour)]`, with PM2.5 at *t* as target. A sample is dropped if any lag
    hour is missing. Optional rolling mean / std can be added.
 6. **Patches**: one patch per station from the Master GeoTIFF, centred on the raster cell that contains the
-   sensor, 320 m / raster resolution pixels wide (32 at 10 m, 1 on the 500 m pilot), zero-padded at the edge.
+   sensor, 320 m / raster resolution pixels wide (32 at the 10 m raster), zero-padded at the edge.
    Stored once per station and looked up per sample, so the data does not grow with the number of hours.
 7. **Scalers** are fit on the training partition only. The target and every PM2.5-derived column share one
    standard scaler; raster bands are scaled per band over the training stations' patches.
@@ -457,6 +660,12 @@ The CNN's feature map is a switch: `pool` (default) average-pools it to 1×1 and
    `--tuned`). This model is `best_dual_branch_model.pt`.
 
 `epochs` in `train.yaml` is only an upper limit; early stopping ends training once validation loss stops improving.
+
+**Speed.** A station's patch is the same for every hour, so a batch repeats the same few patches. The CNN therefore
+processes each *distinct* patch of a batch once and the result is looked up per row (dropout is still applied per
+row). The outputs and gradients are identical to the plain computation (tested), and on the 10 m data it is much
+faster: with batch 256 an epoch over the 300 thousand training rows takes about 2 minutes instead of 15 on a 4-thread
+CPU (about 7 minutes instead of 15 at the default batch 64). Larger batches gain the most.
 
 ### 3.5 Hyperparameter tuning
 
@@ -588,13 +797,39 @@ checkpoints/
 tuning/<id>/
     best_hyperparameters.json  tune_info.json  search_outer_*.json  search_final.json  convergence_final.png
 snapshots/<run_id>/
-    metrics_summary.json  geocp.json  calibration_table.csv  predictions_calibration.csv  predictions_test.csv
-    spatial_bias.json  residuals_by_cell.csv  lisa_map.png  lisa_on_bands.png  run_info.json
-    loss_curve.png  pred_vs_obs.png  residual_hist.png  timeseries_sample.png  geocp_coverage.png
+    SUMMARY.md  metrics_summary.json  run_info.json
+    plots/    loss_curve.png  pred_vs_obs.png  residual_hist.png  timeseries_sample.png  accuracy_by_station.png
+              geocp_coverage.png  lisa_map.png  lisa_on_bands.png
+    tables/   accuracy_summary.csv  accuracy_by_station.csv  cv_folds.csv
+    data/     predictions_test.csv  predictions_calibration.csv  calibration_table.csv  geocp.json
+              spatial_bias.json  residuals_by_cell.csv
     surface/<YYYYMMDD>/   prediction_volume.tif  lower_volume.tif  upper_volume.tif  width_volume.tif
                           prediction_daily_mean.tif  output_summary.json  maps/*.png
     explain/<YYYYMMDD_HHMM>/   gradcam_hot_cells.png  gradcam_cold_cells.png  gradcam_attention.csv  gradcam_summary.json
 ```
+
+### Visualizations at a glance
+
+| Picture | Made by | Shows |
+|---|---|---|
+| `loss_curve.png` | `report` | training and validation loss per epoch for every CV fold, the final fit dashed, best epochs as dots |
+| `pred_vs_obs.png` | `report` | predicted vs observed PM2.5 on the test stations (density hexbins, 1:1 line; n, RMSE and r in the title) |
+| `residual_hist.png` | `report` | histogram of prediction − observation with the mean marked |
+| `timeseries_sample.png` | `report` | the last 7 days at the best-covered test station: observed, predicted and the GeoCP band |
+| `accuracy_by_station.png` | `report` | RMSE of every test station (bars) with its MAE (dots) against the overall RMSE |
+| `geocp_coverage.png` | `report` | per test station, the share of readings inside the interval against the target |
+| `lisa_map.png` | `bias` | grid cells coloured by LISA cluster (or by mean residual if LISA was not run); Moran's I in the title |
+| `lisa_on_bands.png` | `bias` | the LISA clusters laid over every morphology band |
+| `convergence_final.png` | `tune` | validation loss of every Bayesian-search trial and the best so far |
+| `maps/aqi_HHMM.png` | `infer` | one map per snapshot on the Philippine AQI scale, stations marked (optional outline above 35 µg/m³, off by default) |
+| `maps/daily_panels.png` | `infer` | the day's snapshots side by side on one scale |
+| `maps/daily_mean.png` | `infer` | the 24-hour mean on the same scale (optional outline at the 50 µg/m³ guideline, off by default) |
+| `gradcam_hot_cells.png`, `gradcam_cold_cells.png` | `explain` | for the highest / lowest predicted cells: every morphology band with the attended region outlined, and the Grad-CAM map |
+
+Not drawn as pictures (yet): the GeoCP **interval-width surface** exists only as a GeoTIFF (`width_volume.tif`), although
+the thesis asks to inspect it visually; coverage by zone (urban core vs periphery) is in the numbers only; there is no
+map of which stations are train / calibration / test; SHAP belongs to the XGBoost branch; and the comparison with
+earlier local studies needs external data.
 
 ---
 
@@ -606,9 +841,17 @@ State these when reporting results.
   train and test. Scores measure generalisation to *new locations*, not forecasting.
 - Inside a fold the spatial lag has fewer reference stations, so a held-out station's lag is slightly less
   informative than in production.
-- **The pilot raster is 500 m**, so patches are 1×1 pixel and the CNN is nearly an MLP; only 18 of 45 pilot
-  sensors fall inside it. Pilot results show the wiring, not the science.
-- With few calibration stations GeoCP coverage can fall below target on the test stations (0.83 vs 0.90 on the pilot).
+- **The raster does not cover the whole NCR.** It stops at 14.398 °N, and the Tunasan station in Muntinlupa lies 2.3 km
+  south of it ([2.14](#214-covering-the-whole-ncr)). That station is skipped and nothing is predicted for that part.
+  Without an NCR boundary file the missing area cannot be measured exactly.
+- The raster is a rectangle, so maps also cover Manila Bay and the neighbouring provinces, and far from any sensor a
+  prediction is mostly the nearest stations' values.
+- **The numbers in this file are from 2-epoch smoke runs** on 44 stations; the model has not been trained to
+  convergence or tuned on this data yet.
+- The Quezon City sensors (`data/QC Data`) are converted by `preprocessing/qc_convert.py` ([2.1b](#21b-the-quezon-city-sensors-qc-data)) but `configs/data.yaml` still reads OpenAQ only until you point it at them.
+- A full-resolution city map takes hours on a CPU (see [2.6](#26-make-the-maps)).
+- With few calibration stations GeoCP coverage can fall below target on the test stations (0.87 vs 0.90 in the 2-epoch
+  run, with 7 calibration stations).
 - **The rasters stage has only been tested on synthetic data**, not on the real building / street / height / NDVI files.
 - **City-wide inference is an interpretation** of the thesis (see 3.9). The model was trained on sensors whose
   own lags are real readings, and the GeoCP calibration scores also come from real histories, so intervals on
@@ -625,7 +868,7 @@ State these when reporting results.
 
 ## 6. How it was checked
 
-`python -m pytest tests -q` runs 208 tests, 204 of which apply when `contextily` is installed (about 1 min), covering: configuration and the CRS check; the reset command; the infer / geocp workflow; shapes and
+`python -m pytest tests -q` runs 317 tests, 313 of which apply when `contextily` is installed (about 1 min), covering: configuration and the CRS check; the reset command; the infer / geocp workflow; the coverage check; the QC data conversion and the `qcdata_` loader; progress, hang detection and timeouts (also for the tune stage); the accuracy report and the snapshot layout, the map outline switch and the smooth band edges; shared-patch training; shapes and
 gradient flow into both branches (pool and flatten); trainer and checkpoint round trips; metrics against
 hand-computed values; gap capping; patch/window alignment checked by hand; partitioning; the spatial lag
 (hand-computed, leakage, per-fold); scalers; GeoCP (normalisation, clipping, Table 4.2 metrics, zones, grid
@@ -635,7 +878,8 @@ patches equal the training extraction, stand-in hand-computed); output volumes, 
 (including pixel comparisons for the basemap switches); Grad-CAM (localisation, determinism, hooks removed).
 
 End-to-end runs on the pilot data covered preprocess → tune → train `--tuned` → geocp → bias → report → infer
-→ explain, a temporal-only run compared with `--baseline`, and both CRS versions.
+→ explain, a temporal-only run compared with `--baseline`, and (on the data folder) preprocess → train → report → infer
+→ explain, including Grad-CAM on real 32 × 32 patches.
 
 ---
 

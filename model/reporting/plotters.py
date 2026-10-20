@@ -135,6 +135,28 @@ def plot_geocp_coverage(per_station: list[dict], target: float, out_path: str) -
     _save(fig, out_path)
 
 
+def plot_accuracy_by_station(rows: list[dict], overall_rmse: float, out_path: str) -> None:
+    """RMSE of every test station (bars, worst first) with its MAE (dot) and the overall RMSE (orange line)."""
+    rows = list(rows)
+    fig, ax = _axes((7.2, max(2.8, 0.42 * len(rows) + 1.4)))
+    ax.grid(False)
+    ax.grid(True, axis="x", color=GRID, linewidth=0.8)
+    ypos = np.arange(len(rows))[::-1]
+    labels = [(r.get("name") or str(r["location_id"]))[:34] for r in rows]
+    ax.barh(ypos, [r["rmse"] for r in rows], color=BLUE, height=0.6)
+    ax.plot([r["mae"] for r in rows], ypos, "o", color=INK, markersize=4)
+    ax.axvline(overall_rmse, color=ORANGE, lw=1.4)
+    top = max(r["rmse"] for r in rows)
+    for y, r in zip(ypos, rows):
+        ax.text(r["rmse"] + 0.01 * top, y, f"{r['rmse']:.1f}", va="center", color=INK, fontsize=8.5)
+    ax.set_yticks(ypos, labels)
+    ax.set_xlim(0, top * 1.12)
+    ax.set_xlabel("error in ug/m3 (bar = RMSE, dot = MAE)")
+    ax.set_title(f"Accuracy per test station (overall RMSE {overall_rmse:.1f}, orange line)", color=INK, fontsize=10,
+                 loc="left")
+    _save(fig, out_path)
+
+
 def plot_search_convergence(trials: list[dict], out_path: str) -> None:
     """Validation loss of every Bayesian-search trial (dots) and the best so far (line)."""
     fig, ax = _axes()

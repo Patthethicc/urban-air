@@ -8,6 +8,7 @@
     python run_pipeline.py --stage geocp   [--run-id 20260101_120000]
     python run_pipeline.py --stage bias    [--run-id 20260101_120000]   # Moran's I / LISA on out-of-fold residuals
     python run_pipeline.py --stage report  [--run-id ...] [--baseline <temporal-only run id>]
+    python run_pipeline.py --stage coverage      # does the Master GeoTIFF cover all sensors / the whole NCR? (read-only)
     python run_pipeline.py --stage clean         # RESET: dry run, lists the generated outputs it would delete
     python run_pipeline.py --stage clean --yes   #        ... and deletes them (also: --keep tuning, --include-rasters)
     python run_pipeline.py --stage surface --prediction-raster pm25.tif [--run-id ...]   # GeoCP rasters for any prediction raster
@@ -18,16 +19,23 @@
 
     --tuned   train with the hyperparameters found by --stage tune instead of the YAML values
     --override train.epochs=5 --override "data.temporal.lags=[2,1]"   (section.key=value, YAML values)
+
+Long stages print progress and stop with exit code 124 if they hang or pass train.runtime.max_hours (runtime_guard.py).
 """
 import argparse
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+import runtime_guard
 from config_parser import load_config
+from reporting.layout import snap_file
+from reporting.summary import headline_text, training_summary_text
+from runtime_guard import StageTimeout
 from seed import set_seed
 
 MODEL_FILE = "best_dual_branch_model.pt"
@@ -52,8 +60,8 @@ def _load_geocp(cfg: dict, run_id: str):
     from uncertainty.geocp import GeoCP
 
     snap = Path(_paths(cfg)["snapshots_dir"]) / run_id
-    selected = json.loads((snap / "geocp.json").read_text(encoding="utf-8"))["selected"]
-    table = pd.read_csv(snap / "calibration_table.csv")
+    selected = json.loads(snap_file(snap, "geocp.json").read_text(encoding="utf-8"))["selected"]
+    table = pd.read_csv(snap_file(snap, "calibration_table.csv"))
     stations = _cell_stations(pd.read_csv(Path(_paths(cfg)["processed_dir"]) / "stations.csv"))
     return GeoCP(selected["alpha"], selected["kernel"], float(selected["bandwidth_m"]),
                  selected["finite_sample_correction"]).fit(table[["location_id", "score"]], stations)
@@ -63,7 +71,7 @@ def _ensure_geocp(cfg: dict, run_id: str) -> None:
     """The interval rasters need the GeoCP calibration of the run (calibration_table.csv + geocp.json), which only the
     geocp stage writes. Run it now when it is missing, as `report` does, instead of failing on a missing file."""
     snap = Path(_paths(cfg)["snapshots_dir"]) / run_id
-    if not ((snap / "geocp.json").exists() and (snap / "calibration_table.csv").exists()):
+    if not (snap_file(snap, "geocp.json").exists() and snap_file(snap, "calibration_table.csv").exists()):
         print(f"no GeoCP calibration found for run {run_id}: running --stage geocp first "
               "(it calibrates the prediction intervals)")
         geocp(cfg, run_id)
@@ -142,6 +150,16 @@ def build_rasters(cfg: dict) -> None:
     print(f"done ({d['crs']}): {out}\nSet paths.master_raster to this file in configs/data.yaml.")
 
 
+def coverage(cfg: dict) -> dict:
+    """Read-only: which sensors fall outside the Master GeoTIFF (they would be skipped = a silent crop of the study
+    area) and, if data.paths.boundary is set, how much of the NCR boundary the raster covers."""
+    from config_parser import check_raster_crs
+    from preprocessing.coverage import check_coverage
+
+    check_raster_crs(cfg)
+    return check_coverage(cfg)
+
+
 def preprocess(cfg: dict) -> None:
     """Order matters (the spatial lag needs the partition):
       1. clean_loader.load_clean                       hourly, interpolated (cap 24 h)
@@ -165,6 +183,8 @@ def preprocess(cfg: dict) -> None:
     d, dv = cfg["data"], cfg["derived"]
     out_dir = Path(_paths(cfg)["processed_dir"])
     check_raster_crs(cfg)
+    from preprocessing.coverage import check_coverage
+    check_coverage(cfg)                              # lists sensors outside the raster; stops if data.coverage.strict
 
     print("loading + cleaning sensor series")
     df = load_clean(cfg)
@@ -259,8 +279,12 @@ def train(cfg: dict) -> str:
 
     set_seed(tc["seed"])
     info = new_run_info(run_id, cfg, DualBranchNet(mc), data_summary)
+    info["status"] = "running"                    # completed / timed_out replace it; still "running" = killed from outside
     save_run_info(run_dir, info)
     history = {"folds": [], "final": None}
+    folds = int(cfg["data"]["split"]["cv_folds"])
+    runtime_guard.set_plan(passes=(folds + folds / (folds - 1)) if tc["cv"]["enabled"] and folds > 1 else 1,
+                           max_epochs=int(tc["epochs"]))       # K folds on (K-1)/K of the stations + the final fit on all
 
     train_ds = AirQualityDataset(processed, "train")
     recomputer = SpatialLagRecomputer(cfg)
@@ -286,7 +310,7 @@ def train(cfg: dict) -> str:
                 "best_epoch": hist["best_epoch"], "epochs_run": hist["epochs_run"],
                 "best_val_loss": hist["best_val_loss"], "metrics": metrics,
             })
-            print(f"[fold {k}] held-out stations RMSE {metrics['rmse']:.3f}  MAE {metrics['mae']:.3f}")
+            print(f"[fold {k}] held-out stations RMSE {metrics['rmse']:.3f}  MAE {metrics['mae']:.3f}  R2 {metrics['r2']:.3f}")
 
     if oof_parts:                                  # out-of-fold predictions: the spatial-bias analysis reads these
         pd.concat(oof_parts, ignore_index=True).to_csv(run_dir / "oof_predictions.csv", index=False)
@@ -299,6 +323,7 @@ def train(cfg: dict) -> str:
     hist = trainer.fit(make_loader(train_ds, tc, True), None, epochs=final_epochs,
                        ckpt_path=str(run_dir / MODEL_FILE), tag="[final]")
     history["final"] = hist
+    info["status"] = "completed"
     info["final_fit"] = {"epochs": final_epochs, "epochs_source": ("tuned epochs (mean best epoch of the winning trial)" if cfg.get("tuned_from")
                                            else "final_epochs override") if tc["final_epochs"]
                          else ("mean best epoch of CV folds" if best_epochs else "train.epochs"),
@@ -308,6 +333,7 @@ def train(cfg: dict) -> str:
     save_run_info(run_dir, info)
     update_runs_index(_paths(cfg)["checkpoints_dir"], info)
     print(f"run {run_id} saved to {run_dir}")
+    print(training_summary_text(info))
     return run_id
 
 
@@ -315,7 +341,7 @@ def geocp(cfg: dict, run_id: str | None) -> str:
     """Predict calibration + test, pick the GeoCP configuration on the calibration stations only,
     then attach intervals to the test predictions (Validation.txt).
 
-    Writes snapshots/<run_id>/: calibration_table.csv (georeferenced scores), predictions_*.csv, geocp.json."""
+    Writes snapshots/<run_id>/data/: calibration_table.csv (georeferenced scores), predictions_*.csv, geocp.json."""
     from training.checkpoint import check_compatibility, load_model
     from training.predict import predict_partition
     from training.run_info import update_run_info, update_runs_index, write_json
@@ -356,10 +382,10 @@ def geocp(cfg: dict, run_id: str | None) -> str:
           f"mean width {test_summary['mean_width']:.2f} ug/m3, median {test_summary['median_width']:.2f}")
     print(f"  urban core {test_summary['coverage_urban_core']}, peripheral {test_summary['coverage_peripheral']}")
 
-    calibration_table(cal, stations).to_csv(snap / "calibration_table.csv", index=False)
-    cal.to_csv(snap / "predictions_calibration.csv", index=False)
-    test.to_csv(snap / "predictions_test.csv", index=False)
-    write_json(snap / "geocp.json", {"selected": best, "candidates": table.to_dict(orient="records"),
+    calibration_table(cal, stations).to_csv(snap_file(snap, "calibration_table.csv", write=True), index=False)
+    cal.to_csv(snap_file(snap, "predictions_calibration.csv", write=True), index=False)
+    test.to_csv(snap_file(snap, "predictions_test.csv", write=True), index=False)
+    write_json(snap_file(snap, "geocp.json", write=True), {"selected": best, "candidates": table.to_dict(orient="records"),
                                      "correction_comparison": comparison, "test": test_summary})
 
     info = update_run_info(run_dir, geocp={"selected": best, "correction_comparison": comparison,
@@ -432,7 +458,7 @@ def infer(cfg: dict, run_id: str | None, timestamps: list[str], dates: list[str]
 
     For every date: one prediction surface per snapshot hour (inference.snapshot_hours: 08, 12, 17, 21),
     stacked into a prediction volume (one band per snapshot) with the aligned GeoCP lower / upper / width
-    volumes, a 24-hour mean surface, AQI-coloured maps (cells above 35 ug/m3 outlined; the mean outlined
+    volumes, a 24-hour mean surface, AQI-coloured maps (optional outline above 35 ug/m3, output.outline_above_threshold; the mean
     at the 50 ug/m3 guideline) and output_summary.json, in snapshots/<run_id>/surface/<YYYYMMDD>/.
 
     Cells without a sensor take the spatial lag of their k nearest stations as PM2.5 history
@@ -459,16 +485,15 @@ def infer(cfg: dict, run_id: str | None, timestamps: list[str], dates: list[str]
         (out_dir / "maps").mkdir(parents=True, exist_ok=True)
         labels = [t.strftime("%H:%M") for t in group]
 
-        layers = {"prediction": [], "lower": [], "upper": [], "width": []}
-        for ts in group:
-            pred, tr = predict_surface(ctx["model"], ctx["scalers"], ctx["padded"], ctx["shape"], ctx["transform"],
-                                       ctx["hourly"], ctx["ref_ids"], ctx["ref_xy"], ts, cfg, ctx["device"])
+        preds, tr = predict_surface(ctx["model"], ctx["scalers"], ctx["padded"], ctx["shape"], ctx["transform"],
+                                    ctx["hourly"], ctx["ref_ids"], ctx["ref_xy"], group, cfg, ctx["device"])
+        # one pass over the raster for all hours; the interval layers are written in place (no per-hour lists + copies)
+        stack = {"prediction": preds, **{k: np.empty_like(preds) for k in ("lower", "upper", "width")}}
+        for i, (ts, pred) in enumerate(zip(group, preds)):
             lo, hi, w = interval_layers(pred, tr, geocp_engine, cfg["geocp"]["min_lower_bound"])
-            for key, arr in zip(layers, (pred, lo, hi, w)):
-                layers[key].append(arr)
+            stack["lower"][i], stack["upper"][i], stack["width"][i] = lo, hi, w
             print(f"{ts}: {int(np.isfinite(pred).sum())} cells, mean {np.nanmean(pred):.1f} ug/m3, "
                   f"mean interval width {np.nanmean(w):.1f}")
-        stack = {k: np.stack(v) for k, v in layers.items()}
 
         for key, arr in stack.items():
             write_volume(arr, tr, ctx["crs"], str(out_dir / f"{key}_volume.tif"), labels)
@@ -581,9 +606,10 @@ def report(cfg: dict, run_id: str | None, baseline: str | None = None) -> None:
     run_id = run_id or latest_run_id(cfg)
     snap_dir = Path(_paths(cfg)["snapshots_dir"]) / run_id
     _ensure_geocp(cfg, run_id)
-    if not (snap_dir / "spatial_bias.json").exists() and (Path(_paths(cfg)["checkpoints_dir"]) / run_id / "oof_predictions.csv").exists():
+    if not snap_file(snap_dir, "spatial_bias.json").exists() and (Path(_paths(cfg)["checkpoints_dir"]) / run_id / "oof_predictions.csv").exists():
         bias(cfg, run_id)
     snap = generate_snapshot(run_id, cfg, baseline)
+    print(headline_text(json.loads((snap / "metrics_summary.json").read_text(encoding="utf-8")), snap))
     print(f"snapshot written to {snap}")
 
 
@@ -618,7 +644,7 @@ def clean(cfg: dict, execute: bool = False, keep=(), include_rasters: bool = Fal
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--stage", required=True, choices=["rasters", "preprocess", "tune", "train", "geocp", "bias", "surface", "infer", "explain", "report", "all",
-                                                       "clean", "reset"])
+                                                       "clean", "reset", "coverage"])
     p.add_argument("--yes", action="store_true", help="clean: really delete (without it clean is a dry run)")
     p.add_argument("--keep", action="append", default=[], choices=["processed", "checkpoints", "snapshots", "tuning"],
                    help="clean: leave this folder alone (repeatable)")
@@ -640,7 +666,35 @@ def main() -> None:
         cfg = apply_tuned(cfg, args.tuned)
         print(f"using tuned hyperparameters from {cfg['tuned_from']}")
     set_seed(cfg["train"]["seed"])
+    runtime_guard.configure(cfg["train"].get("runtime"), on_hard_exit=lambda: _record_timeout(cfg, args.stage, "hang (forced exit)"))
+    try:
+        run(cfg, args)
+    except StageTimeout as err:
+        _record_timeout(cfg, args.stage, str(err))
+        print(f"\nTIMEOUT in stage '{args.stage}': {err}", file=sys.stderr)
+        sys.exit(runtime_guard.EXIT_CODE)
+
+
+def _record_timeout(cfg: dict, stage: str, reason: str) -> None:
+    """Best effort: mark the unfinished training run as timed out, so its folder says why it has no model."""
+    try:
+        if stage not in ("train", "all"):
+            return
+        runs = sorted(p for p in Path(_paths(cfg)["checkpoints_dir"]).glob("*/run_info.json")
+                      if not (p.parent / MODEL_FILE).exists())
+        if runs:
+            info = json.loads(runs[-1].read_text(encoding="utf-8"))
+            info.update(status="timed_out", timeout=reason)
+            runs[-1].write_text(json.dumps(info, indent=2), encoding="utf-8")
+    except Exception:
+        pass                                      # never hide the timeout behind a bookkeeping error
+
+
+def run(cfg: dict, args) -> None:
     stage = args.stage
+    if stage == "coverage":
+        coverage(cfg)
+        return
     if stage in ("clean", "reset"):
         clean(cfg, args.yes, args.keep, args.include_rasters, args.include_tile_cache)
         return

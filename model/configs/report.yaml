@@ -1,7 +1,11 @@
 # The three metrics of Validation.txt (computed on spatially withheld stations, in ug/m3 / unitless R2)
 metrics: [rmse, mae, r2]
 extra_metrics: [ia, pearson_r]      # still computed, listed separately as supplementary
-plots: [loss_curve, pred_vs_obs, residual_hist, timeseries_sample, geocp_coverage]
+plots: [loss_curve, pred_vs_obs, residual_hist, timeseries_sample, accuracy_by_station, geocp_coverage]
+accuracy:                       # extra, easier-to-read accuracy figures next to RMSE / MAE / R2 (reporting/accuracy.py)
+  tolerances_ugm3: [5, 10]      # share of predictions within +/- X ug/m3 of the observation
+  aqi_bands: true               # share of station-hours predicted in the observed AQI band (bands: output.yaml)
+  persistence: true             # yardstick: predict each hour with the previous hour's observation
 dpi: 150
 timeseries_days: 7      # length of the sample time-series plot
 bias:                   # geostatistical bias detection on OUT-OF-FOLD residuals (training stations only)

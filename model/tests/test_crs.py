@@ -15,13 +15,14 @@ def test_utm_51n_is_the_one_coordinate_system(base_cfg):
     assert "crs_profile" not in base_cfg["data"] and "crs_profiles" not in base_cfg["data"]
 
 
-def test_the_default_raster_is_the_utm_pilot_raster(base_cfg):
+def test_the_default_raster_is_the_data_folders_master_raster(base_cfg):
     from pathlib import Path
     from rasterio.crs import CRS
     path = Path(base_cfg["data"]["paths"]["master_raster"])
-    assert path.name == "master_morphology_stack_500m.tif" and path.is_file()
+    assert path.name == "master_raster_v2.tif" and path.parent.name == "Morphology" and path.is_file()
     with rasterio.open(path) as r:
-        assert r.crs == CRS.from_epsg(32651)
+        assert r.crs == CRS.from_epsg(32651) and r.res == (10.0, 10.0) and r.count == 5
+        assert "building_height_stddev" in r.descriptions                          # sigma_H is in the raster
 
 
 def test_outputs_have_no_per_version_sub_folders(base_cfg):
