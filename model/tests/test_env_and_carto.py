@@ -237,6 +237,16 @@ def test_the_real_xyzservices_carto_provider_is_recognised_and_keyed():
     assert SECRET not in provider.url and provider.get("apikey") != SECRET            # the original provider is untouched
 
 
+def test_a_carto_template_without_a_key_placeholder_gets_the_key_appended():
+    """An older xyzservices (Kaggle's) ships CartoDB.Positron without `?key={apikey}`: the key is still sent, and only on the copy."""
+    xyz = pytest.importorskip("xyzservices")
+    old = xyz.TileProvider(name="CartoDB.Positron", url="https://{s}.basemaps.cartocdn.com/{variant}/{z}/{x}/{y}{r}.png",
+                           attribution="x", variant="light_all", subdomains="abcd", max_zoom=20)
+    assert "{apikey}" not in old.url and aqi_maps._is_carto(old)
+    keyed = aqi_maps._with_key(old, SECRET, "key")
+    assert keyed.url.endswith(f".png?key={SECRET}") and SECRET not in old.url
+
+
 def test_real_contextily_receives_the_keyed_provider(cfg, tmp_path, monkeypatch):
     cx = pytest.importorskip("contextily")
     calls = []

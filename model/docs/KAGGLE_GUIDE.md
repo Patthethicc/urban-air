@@ -50,7 +50,7 @@ Our own dev environment is Python 3.14, pandas 3, numpy 2.4, torch 2.13. Kaggle'
    ```bash
    git push
    ```
-2. **Run the tests locally**: `cd model && python -m pytest -q` should end `374 passed, 4 skipped`.
+2. **Run the tests locally**: `cd model && python -m pytest -q` should end `376 passed, 4 skipped`.
 3. **Build the upload folder** (it copies only what the pipeline reads: 984 MB, 607 files, 4 top-level folders; it leaves out the
    `combined_hourly.csv` files, which the pipeline never reads, and `QC Data/`, which only the converter needs). Run from the repo root:
    ```python
@@ -167,7 +167,7 @@ if missing:
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", *missing], check=True)
 subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], cwd=MODEL)
 ```
-Expected: `374 passed, 4 skipped` after a `git clone`. If you uploaded the repo as a dataset instead (no `.git` folder), exactly one test fails,
+Expected: `376 passed, 4 skipped` after a `git clone`. If you uploaded the repo as a dataset instead (no `.git` folder), exactly one test fails,
 `test_dotenv_is_git_ignored_but_the_template_is_not`, because it asks git a question. That one is harmless. Any other failure means
 a library version differs: read the message before spending GPU hours.
 
@@ -254,9 +254,20 @@ without that, about 12 % of the cells would get no prediction. Add `"--override"
 run("infer", CHOSEN, "--run-id", TUNED, "--date", "2025-07-01", extra=["--override", "inference.stride_px=11"])
 run("explain", CHOSEN, "--run-id", TUNED, "--timestamp", "2025-07-01 12:00", extra=["--override", "inference.stride_px=11"])
 ```
-Add `"--override", "output.basemap.enabled=false"` to skip the web basemap (it needs Internet and a CARTO key). With the key, put it in Kaggle
-Secrets and set it with `os.environ["CARTO_API_KEY"] = ...` before the run; never print it. Stride 11 is the quick look; stride 1 is the full
-10 m map and takes hours on a CPU. Measure it on the GPU first.
+The web basemap needs Internet and a CARTO key; without them the maps use the offline basemap (street lines) or a plain background, and the
+numbers are the same. Add `"--override", "output.basemap.enabled=false"` to skip the attempt. `model/.env` is git-ignored, so a clone has none:
+the pipeline reads `CARTO_API_KEY` from the environment instead (a real environment variable wins over `.env`). Put the key in Kaggle Secrets
+(Add-ons, Secrets, label `CARTO_API_KEY`, switched on for this notebook) and run this **right before the maps, not in Cell 5**: the test suite is
+meant to run without real keys. The `run()` helper's subprocess inherits it. Never print the key.
+```python
+try:
+    from kaggle_secrets import UserSecretsClient
+    os.environ["CARTO_API_KEY"] = UserSecretsClient().get_secret("CARTO_API_KEY")
+    print("CARTO_API_KEY set from Kaggle Secrets")
+except Exception as e:          # not attached to this notebook, a different label, or Secrets unavailable
+    print(f"CARTO_API_KEY not set ({type(e).__name__}): the maps will use the offline basemap")
+```
+Stride 11 is the quick look; stride 1 is the full 10 m map and takes hours on a CPU. Measure it on the GPU first.
 
 **Cell 12: tidy up and save.** Everything under `/kaggle/working` is the notebook's output when the run is committed.
 ```python
@@ -330,6 +341,10 @@ runs/
 | `git clone` fails | Internet is off, or the repo is private (use the token variant) |
 | `ModuleNotFoundError: preprocessing` | the command did not run with `cwd=MODEL`; use the `run()` helper |
 | `FileNotFoundError ... locations.csv` or `master_raster_v2.tif` | Cell 4 did not copy the data, or `DATA` points at the wrong folder |
+| Cell 5 shows about 20 failures, all mentioning `master_raster_v2.tif` (`test_combine_dataset`, `test_inference_reuse`, `test_coverage`, `test_crs`) | the same cause: `/kaggle/working/urban-air/data` is missing when the tests run. Check `ls /kaggle/working/urban-air/data`, fix Cell 4, re-run Cell 5 |
+| `esda ... is too old for the two-sided LISA p-values` (or `Moran_Local ... unexpected keyword argument 'alternative'` in the tests) | Kaggle's preinstalled esda is older than the tested 2.10.0: `pip install -U esda libpysal`, restart the session, re-run Cells 2 to 5 |
+| `CARTO basemap tiles need a free API key` on Kaggle | `CARTO_API_KEY` is not in the environment (`model/.env` is not cloned). Re-run the Secrets lines of Cell 11 (they are lost on a restart); check the secret is attached to this notebook and spelled exactly `CARTO_API_KEY`; web tiles also need Internet on |
+| `test_the_real_xyzservices_carto_provider_is_recognised_and_keyed` fails | Kaggle's xyzservices is older and its CARTO template has no key placeholder; the code adds `?key=` itself, so this does not affect results |
 | `ModuleNotFoundError: skopt` (or `libpysal`, `esda`) | Cell 5 was skipped; `tune` needs scikit-optimize, `report` needs libpysal and esda |
 | `CUDA out of memory` in `train` | lower `train.batch_size`; in `infer` lower `inference.chunk_cells` (default 1024) |
 | `TIMEOUT in stage ... no progress for 600 s` (exit code 124) | a real hang was detected; see `runtime:` in `configs/train.yaml`; re-run that stage |

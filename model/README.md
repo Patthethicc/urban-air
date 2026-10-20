@@ -16,7 +16,7 @@ What you get from one run:
 
 > **Status.** Runs on the real data in the repo's `data/` folder: a 10 m Master GeoTIFF (EPSG:32651, 5 bands,
 > 27 × 39 km) and the OpenAQ sensors (44 stations with readings, 2024-08-13 to 2026-10-15). The pipeline runs end to
-> end and 374 tests pass. The numbers quoted in this file come from short smoke runs (2 epochs), so they show that the
+> end and 376 tests pass. The numbers quoted in this file come from short smoke runs (2 epochs), so they show that the
 > wiring works, not what the model can reach. Three things to know before relying on results: the raster stops short of
 > the southern tip of the NCR ([2.14](#214-covering-the-whole-ncr)), a full-resolution city map takes hours on a CPU
 > ([2.6](#26-make-the-maps)), and the pipeline has not been trained to convergence on this data yet.
@@ -160,7 +160,7 @@ to its `sensors/` folder in `configs/data.yaml`, then re-run `preprocess`. The t
 python -m pytest tests -q
 ```
 
-Expect `374 passed` (and 4 skipped, which only apply when `contextily` is not installed) in about a minute. If something fails here, fix it before running anything else.
+Expect `376 passed` (and 4 skipped, which only apply when `contextily` is not installed) in about a minute. If something fails here, fix it before running anything else.
 
 ### 2.3 First run: the whole pipeline on the data folder
 
@@ -924,7 +924,7 @@ State these when reporting results.
 
 ## 6. How it was checked
 
-`python -m pytest tests -q` runs 378 tests, 374 of which apply when `contextily` is installed (about 1 min), covering: configuration and the CRS check; the reset command; the infer / geocp workflow; the coverage check; the QC data conversion and the `qcdata_` loader; progress, hang detection and timeouts (also for the tune stage); the accuracy report (including the by-year table) and the snapshot layout, the OpenAQ-only history for 2026 dates, the map outline switch and the smooth band edges, the combined datasets, pinned CV folds and the run-comparison tool; shared-patch training; shapes and
+`python -m pytest tests -q` runs 380 tests, 376 of which apply when `contextily` is installed (about 1 min), covering: configuration and the CRS check; the reset command; the infer / geocp workflow; the coverage check; the QC data conversion and the `qcdata_` loader; progress, hang detection and timeouts (also for the tune stage); the accuracy report (including the by-year table) and the snapshot layout, the OpenAQ-only history for 2026 dates, the map outline switch and the smooth band edges, the combined datasets, pinned CV folds and the run-comparison tool; shared-patch training; shapes and
 gradient flow into both branches (pool and flatten); trainer and checkpoint round trips; metrics against
 hand-computed values; gap capping; patch/window alignment checked by hand; partitioning; the spatial lag
 (hand-computed, leakage, per-fold); scalers; GeoCP (normalisation, clipping, Table 4.2 metrics, zones, grid

@@ -72,8 +72,15 @@ def global_moran(values, w, permutations: int = 999, seed: int = 42, alpha: floa
 
 def local_moran(values, w, permutations: int = 999, seed: int = 42, alpha: float = 0.05) -> pd.DataFrame:
     """LISA per cell: local I, pseudo p-value, quadrant and cluster label ('Not significant' if p >= alpha)."""
+    import inspect
+
+    import esda
     from esda.moran import Moran_Local
 
+    if "alternative" not in inspect.signature(Moran_Local.__init__).parameters:     # older esda: only one-sided p-values
+        raise RuntimeError(f"esda {getattr(esda, '__version__', '?')} is too old for the two-sided LISA p-values used here "
+                           "(its Moran_Local has no 'alternative' option). Upgrade with `pip install -U esda libpysal` and "
+                           "restart the Python session (on Kaggle: restart the notebook session, then re-run the setup cells).")
     np.random.seed(seed)
     lm = Moran_Local(np.asarray(values, dtype=float), w, permutations=permutations, alternative="two-sided")
     quadrant = np.array([QUADRANT[int(q)] for q in lm.q])

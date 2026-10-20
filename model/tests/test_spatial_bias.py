@@ -62,6 +62,21 @@ def test_lisa_labels_under_and_over_prediction_clusters():
     assert (lisa["cluster"] == "High-High").sum() >= 3 and (lisa["cluster"] == "Low-Low").sum() >= 3
 
 
+def test_an_esda_without_the_alternative_option_is_refused_with_the_fix(monkeypatch):
+    """Kaggle's preinstalled esda can be older than the one this was tested with: say so, instead of a bare TypeError."""
+    import esda.moran
+
+    class OldMoranLocal:                                       # the signature of an esda before the `alternative` option
+        def __init__(self, y, w, transformation="r", permutations=999, geoda_quads=False, n_jobs=1, keep_simulations=True,
+                     seed=None, island_weight=0):
+            raise AssertionError("must not be called: the check comes first")
+
+    monkeypatch.setattr(esda.moran, "Moran_Local", OldMoranLocal)
+    cells = _grid_cells()
+    with pytest.raises(RuntimeError, match=r"esda .* too old.*pip install -U esda"):
+        local_moran(cells["mean_residual"], knn_weights(cells[["cx", "cy"]].to_numpy(), k=4), permutations=99)
+
+
 def test_band_profile_reports_how_clusters_differ_from_all_cells():
     cells = pd.DataFrame({"cluster": ["High-High"] * 3 + ["Low-Low"] * 3})
     means = np.array([[10.0, 1.0]] * 3 + [[2.0, 1.0]] * 3)           # band 0 differs, band 1 constant
