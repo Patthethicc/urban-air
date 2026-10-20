@@ -184,13 +184,18 @@ def load_context(fold_json=None):
             'centroids': centroids, 'fold_doc': doc}
 
 
-def predict_raw(model, frame):
-    """Point predictions back in raw ug/m3 (the model is fitted on log1p)."""
-    return np.expm1(model.predict(frame[prep.features].values))
+def predict_raw(model, frame, feature_names=None):
+    """Point predictions back in raw ug/m3 (the model is fitted on log1p).
+
+    `feature_names` defaults to prep.features (the 24-feature arm C contract). Deploying a different
+    arm means passing its own list -- otherwise XGBoost raises "Feature shape mismatch".
+    """
+    cols = list(feature_names or prep.features)
+    return np.expm1(model.predict(frame[cols].values))
 
 
 def calibration_scores_for_model(model, df, grid_ids, mapping_csv_path=None,
-                                 centroids=None):
+                                 centroids=None, feature_names=None):
     """Georeferenced calibration table for an ALREADY-FITTED model and an explicit cell list.
 
     This is the entry point for the notebook, which fits the production model in its own cells and
@@ -204,7 +209,7 @@ def calibration_scores_for_model(model, df, grid_ids, mapping_csv_path=None,
     panel = df[df['Grid_ID'].isin(list(grid_ids))].reset_index(drop=True).copy()
     panel['cx'] = panel['Grid_ID'].map(centroids['cx'])
     panel['cy'] = panel['Grid_ID'].map(centroids['cy'])
-    pred = predict_raw(model, panel)
+    pred = predict_raw(model, panel, feature_names)
     return pd.DataFrame({
         'Location': panel['Location'].values,
         'Grid_ID': panel['Grid_ID'].values,
@@ -235,7 +240,7 @@ def distance_matrix(query_xy, cal_xy):
 
 
 def intervals_for_cells(cal_scores, query_xy, model_pred, alpha, h, kernel,
-                        finite_sample_correction=True):
+                        finite_sample_correction=True, batch_size=None, memory_budget_gb=2.0):
     """GeoCP intervals for every query row, using its cell's coordinates.
 
     Returns a frame with prediction, q, lower/upper (unclipped), the display lower bound, width, and
@@ -246,18 +251,34 @@ def intervals_for_cells(cal_scores, query_xy, model_pred, alpha, h, kernel,
     cells. Record-level weights are misleading here because each cell contributes thousands of
     records, so no single record can ever carry much weight.
     """
-    d = distance_matrix(query_xy, cal_scores[['cx', 'cy']].values)
+    # `distance_matrix` builds an `n_query x n_cal` array of coordinate differences, so at full scale
+    # this asked for n_query*n_cal*2 float64s: 77,669 test rows against 144,652 calibration records is
+    # 167 GiB, which raises _ArrayMemoryError rather than merely being slow. Process queries in
+    # batches sized to `memory_budget_gb`; the maths is unchanged, and per-cell weight sums use
+    # bincount instead of a per-query pandas groupby (same numbers, far cheaper).
+    cal_xy = cal_scores[['cx', 'cy']].values
     scores = cal_scores['alpha'].values
-    cell_ids = cal_scores['Grid_ID'].values
-    q_vals = np.empty(len(query_xy))
-    top_cell = np.empty(len(query_xy))
-    eff_cells = np.empty(len(query_xy))
-    for i in range(len(query_xy)):
-        w = normalised_weights(d[i], h, kernel)
-        q_vals[i] = weighted_quantile(scores, w, 1.0 - alpha, finite_sample_correction)
-        per_cell = pd.Series(w).groupby(cell_ids).sum().values
-        top_cell[i] = float(np.max(per_cell))
-        eff_cells[i] = 1.0 / float(np.sum(per_cell ** 2))
+    codes, _ = pd.factorize(cal_scores['Grid_ID'])
+    n_cells = int(codes.max()) + 1 if len(codes) else 0
+
+    n = len(query_xy)
+    per_query_bytes = max(1, len(cal_xy) * 2 * 8)
+    cap = max(1, int(memory_budget_gb * 1024 ** 3 / per_query_bytes))
+    step = cap if batch_size is None else max(1, min(int(batch_size), cap))
+
+    q_vals = np.empty(n)
+    top_cell = np.empty(n)
+    eff_cells = np.empty(n)
+    for start in range(0, n, step):
+        stop = min(start + step, n)
+        d = distance_matrix(query_xy[start:stop], cal_xy)
+        for k in range(stop - start):
+            w = normalised_weights(d[k], h, kernel)
+            q_vals[start + k] = weighted_quantile(scores, w, 1.0 - alpha,
+                                                  finite_sample_correction)
+            per_cell = np.bincount(codes, weights=w, minlength=n_cells)
+            top_cell[start + k] = float(per_cell.max())
+            eff_cells[start + k] = 1.0 / float(np.sum(per_cell ** 2))
     return pd.DataFrame({
         'prediction': model_pred,
         'q': q_vals,
@@ -276,7 +297,8 @@ def coverage(actual, lower, upper):
 
 
 def quantile_grid(cal_scores, query_xy, h, kernel='gaussian', level=0.90, batch_size=20000,
-                  finite_sample_correction=True, width_cap=None, effective_level=None):
+                  finite_sample_correction=True, width_cap=None, effective_level=None,
+                  memory_budget_gb=2.0):
     """Exact weighted quantile at many query points at once.
 
     Same definition as weighted_quantile (Eq. 3.44/3.45: the smallest calibration score whose weighted
@@ -302,9 +324,17 @@ def quantile_grid(cal_scores, query_xy, h, kernel='gaussian', level=0.90, batch_
     threshold = (float(effective_level) if effective_level is not None
                  else _effective_level(level, m, finite_sample_correction))
 
+    # `batch_size` alone is not a memory bound: the batch builds a [b, m, 2] difference array, so at
+    # full scale 20,000 x 271,962 is 87 GiB. Cap the batch by a byte budget as well. On the pilot
+    # (m = 5,770) this is a no-op; on the full grid it is the difference between working and
+    # _ArrayMemoryError for shape (3696, 271962, 2).
+    per_query_bytes = max(1, m * 2 * 8)
+    cap = max(1, int(memory_budget_gb * 1024 ** 3 / per_query_bytes))
+    step = max(1, min(int(batch_size), cap))
+
     out = np.empty(len(query_xy), dtype=float)
-    for start in range(0, len(query_xy), batch_size):
-        part = query_xy[start:start + batch_size]
+    for start in range(0, len(query_xy), step):
+        part = query_xy[start:start + step]
         dist = np.sqrt(((part[:, None, :] - cal_xy[None, :, :]) ** 2).sum(axis=-1))   # [b, m]
         for i in range(len(part)):
             # normalised_weights() is reused rather than re-deriving weights here. It carries the
@@ -337,8 +367,17 @@ def resolve_bandwidth(cal_scores, alpha, kernel, h_grid, h_mode, h_fixed, finite
     if h_mode == 'median-distance':
         if query_xy is None:
             raise ValueError('median-distance mode needs the query coordinates')
-        d = distance_matrix(np.asarray(query_xy, dtype=float),
-                            cal_scores[['cx', 'cy']].values).min(axis=1)
+        # Nearest-calibration distance for EVERY query cell: batching avoids materialising
+        # [n_query, n_cal, 2] (15 GiB for 3,696 cells against 271,962 records).
+        q = np.asarray(query_xy, dtype=float).reshape(-1, 2)
+        cal_xy = cal_scores[['cx', 'cy']].values
+        per_query_bytes = max(1, len(cal_xy) * 2 * 8)
+        step = max(1, int(2.0 * 1024 ** 3 / per_query_bytes))
+        d = np.empty(len(q), dtype=float)
+        for start in range(0, len(q), step):
+            part = q[start:start + step]
+            d[start:start + len(part)] = np.sqrt(
+                ((part[:, None, :] - cal_xy[None, :, :]) ** 2).sum(axis=-1)).min(axis=1)
         chosen = float(np.median(d))
         rule = (f'h = median distance from the query cells to their nearest calibration '
                 f'observation ({chosen:.0f} m); geometry only, no labels used')
@@ -509,10 +548,35 @@ def summarise(intervals, alpha, h, kernel, rule):
 
 
 def run(alphas=DEFAULT_ALPHAS, kernel='gaussian', h=None, finite_sample_correction=True,
-        out_dir=OUT_DIR, h_mode='thesis-grid'):
+        out_dir=OUT_DIR, h_mode='thesis-grid', max_cal=None, max_eval=None, seed=42):
+    """Run GeoCP for each alpha.
+
+    `max_cal` / `max_eval` cap the number of calibration records and test rows used, by a seeded random
+    subsample. They exist because the weighted quantile is O(n_query x n_cal) and the bandwidth search
+    repeats it for every candidate h and every leave-one-cell-out fold: on the 18-sensor pilot
+    (5,420 calibration records) that is a few minutes, but on the 84-location network
+    (~145,000 records) the same code needs hundreds of billions of operations and does not finish.
+
+    Both default to None (use everything), so the published pilot numbers are reproduced exactly.
+    When a cap bites, the reduction is REPORTED in stdout and in geocp_config.json, and the
+    finite-sample correction is computed from the reduced count -- i.e. the interval stays a valid
+    split-conformal interval for the data actually used, it is simply estimated from fewer scores.
+    """
     ctx = load_context()
     os.makedirs(out_dir, exist_ok=True)
+    n_test_all = int(len(ctx['test']))
+    if max_eval is not None and n_test_all > max_eval:
+        ctx['test'] = (ctx['test'].sample(n=int(max_eval), random_state=seed)
+                       .sort_values(['Grid_ID', 'cx', 'cy']).reset_index(drop=True))
+        print(f'!! test rows subsampled for evaluation: {max_eval:,} of {n_test_all:,} '
+              f'(seeded, seed={seed}). Coverage is estimated from the subsample.')
     cal_scores = calibration_scores(ctx)
+    n_cal_all = int(len(cal_scores))
+    if max_cal is not None and n_cal_all > max_cal:
+        cal_scores = (cal_scores.sample(n=int(max_cal), random_state=seed)
+                      .sort_values(['Grid_ID', 'cx', 'cy']).reset_index(drop=True))
+        print(f'!! calibration scores subsampled for tractability: {max_cal:,} of {n_cal_all:,} '
+              f'(seeded, seed={seed}). Report this in the methods.')
     cal_scores.to_csv(os.path.join(out_dir, 'geocp_calibration_scores.csv'), index=False)
 
     print('=== calibration nonconformity scores (alpha_i = |y - yhat|, ug/m3) ===')
@@ -595,7 +659,13 @@ def run(alphas=DEFAULT_ALPHAS, kernel='gaussian', h=None, finite_sample_correcti
         'model': {'params': ctx['params'], 'n_estimators': ctx['n_estimators'],
                   'params_from_outer_fold': ctx['best_fold']},
         'n_calibration_records': int(len(cal_scores)),
+        'n_calibration_records_available': n_cal_all,
+        'calibration_subsample': (None if max_cal is None or n_cal_all <= max_cal
+                                  else {'used': int(max_cal), 'of': n_cal_all, 'seed': seed}),
         'n_test_records': int(len(ctx['test'])),
+        'n_test_records_available': n_test_all,
+        'test_subsample': (None if max_eval is None or n_test_all <= max_eval
+                           else {'used': int(max_eval), 'of': n_test_all, 'seed': seed}),
     }
     with open(os.path.join(out_dir, 'geocp_config.json'), 'w', encoding='utf-8') as fh:
         json.dump(cfg, fh, indent=2, sort_keys=True)
@@ -616,10 +686,16 @@ def main():
                     help='bandwidth in metres, used when --h-mode fixed')
     ap.add_argument('--no-finite-sample-correction', action='store_true')
     ap.add_argument('--out-dir', default=OUT_DIR)
+    ap.add_argument('--max-cal', type=int, default=None,
+                    help='cap calibration records with a seeded subsample (tractability on large '
+                         'networks; default: use all, which reproduces the pilot)')
+    ap.add_argument('--max-eval', type=int, default=None,
+                    help='cap test rows used for evaluation')
+    ap.add_argument('--seed', type=int, default=42)
     args = ap.parse_args()
     run(alphas=tuple(args.alpha), kernel=args.kernel, h=args.h,
         finite_sample_correction=not args.no_finite_sample_correction, out_dir=args.out_dir,
-        h_mode=args.h_mode)
+        h_mode=args.h_mode, max_cal=args.max_cal, max_eval=args.max_eval, seed=args.seed)
 
 
 if __name__ == '__main__':
