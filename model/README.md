@@ -16,7 +16,7 @@ What you get from one run:
 
 > **Status.** Runs on the real data in the repo's `data/` folder: a 10 m Master GeoTIFF (EPSG:32651, 5 bands,
 > 27 × 39 km) and the OpenAQ sensors (44 stations with readings, 2024-08-13 to 2026-10-15). The pipeline runs end to
-> end and 331 tests pass. The numbers quoted in this file come from short smoke runs (2 epochs), so they show that the
+> end and 374 tests pass. The numbers quoted in this file come from short smoke runs (2 epochs), so they show that the
 > wiring works, not what the model can reach. Three things to know before relying on results: the raster stops short of
 > the southern tip of the NCR ([2.14](#214-covering-the-whole-ncr)), a full-resolution city map takes hours on a CPU
 > ([2.6](#26-make-the-maps)), and the pipeline has not been trained to convergence on this data yet.
@@ -41,14 +41,14 @@ pip install -r requirements.txt
 python -m pytest tests -q
 python run_pipeline.py --stage coverage
 python run_pipeline.py --stage all --override train.epochs=2 --override train.batch_size=256
-python run_pipeline.py --stage infer --date 2026-04-11 --override inference.stride_px=21
+python run_pipeline.py --stage infer --date 2025-07-01 --override inference.stride_px=21
 ```
 
 `coverage` checks in a second that the raster covers your sensors. The `all` line runs the data through
 preprocessing, training, GeoCP, the bias check and the report in about 10 minutes on a CPU (2 epochs; the defaults
 train much longer). The `infer` line maps the whole raster at a coarse 210 m grid in about 2 minutes; the full 10 m
 grid takes hours (see [2.6](#26-make-the-maps)). Results are in `snapshots/<run_id>/` and the maps in
-`snapshots/<run_id>/surface/20260411/maps/`.
+`snapshots/<run_id>/surface/20250701/maps/`.
 
 ---
 
@@ -139,6 +139,16 @@ so the spatial split, are identical. Compare on the SAME rows: `--stage report -
 the rows both have. Scoring the twin on its own rows would flatter it, because the kept pre-installation readings follow the network
 median closely and are easy to predict. `python -m preprocessing.combine_dataset --only-clean` skips the twins.
 
+**Training on Kaggle.** `docs/KAGGLE_GUIDE.md` is the cell-by-cell guide (upload the data, clone the code, run the stages, split the work across
+sessions); every command in it was run once in a local stand-in for Kaggle.
+
+**Comparing the datasets.** `docs/EXPERIMENT_CHECKLIST.md` is the step-by-step plan (train on each, pick by out-of-fold scores, then tune).
+Two pieces support it. `data.split.cv_assignment: by_station` (default `balanced`) gives every station its CV fold from a seeded shuffle of the
+station ids, so every dataset validates the same station groups (the default balances folds by rows, which moves stations between folds
+whenever the data changes). `python -m reporting.compare_runs --runs-root runs` scores all runs on the (station, hour) rows they share, with the
+mean and sd over seeds, the gap to the best dataset with a station-bootstrap confidence interval, and a check that all runs used the same folds.
+It uses out-of-fold predictions only, never the test partition.
+
 Each folder has `combined_hourly.csv` (station, coordinates, `network`, cleaned PM2.5, hour encoding) and the per-sensor files plus
 `locations.csv` that the pipeline reads. To train on a range, set `sensor_locations_csv` to its `locations.csv` and `sensor_csv_dir`
 to its `sensors/` folder in `configs/data.yaml`, then re-run `preprocess`. The two networks read differently where both operate
@@ -150,7 +160,7 @@ to its `sensors/` folder in `configs/data.yaml`, then re-run `preprocess`. The t
 python -m pytest tests -q
 ```
 
-Expect `331 passed` (and 4 skipped, which only apply when `contextily` is not installed) in about a minute. If something fails here, fix it before running anything else.
+Expect `374 passed` (and 4 skipped, which only apply when `contextily` is not installed) in about a minute. If something fails here, fix it before running anything else.
 
 ### 2.3 First run: the whole pipeline on the data folder
 
@@ -220,11 +230,12 @@ Open that file first; it is organised for reading, not for parsing:
 | 2. Is that good? | the model next to two simple rules: repeat the previous hour (persistence) and always predict the average level, with the skill against persistence |
 | 3. Does it hold across the splits? | cross-validation, calibration and test side by side |
 | 4. By station | every test station, largest error first, with its interval coverage (and `plots/accuracy_by_station.png`) |
-| 5. Uncertainty | which GeoCP weighting was chosen, coverage against target, interval width, close to versus far from a calibration sensor |
-| 6. Spatial bias | Moran's I of the residuals in one sentence |
-| 7. Training | the folds and the final fit |
-| 8. Read with care | automatic warnings: a short run, few test stations, intervals under target, no better than persistence, unverified AQI limits |
-| 9. Files | what every file in the folder is |
+| 5. By year | the test accuracy per calendar year, with how many OpenAQ and QC stations were scored that year (`tables/accuracy_by_year.csv`); read a year with the stations column in view, because the network mix changes (QC has no readings from 2026) |
+| 6. Uncertainty | which GeoCP weighting was chosen, coverage against target, interval width, close to versus far from a calibration sensor |
+| 7. Spatial bias | Moran's I of the residuals in one sentence |
+| 8. Training | the folds and the final fit |
+| 9. Read with care | automatic warnings: a short run, few test stations, intervals under target, no better than persistence, unverified AQI limits |
+| 10. Files | what every file in the folder is |
 
 How to read the accuracy numbers:
 
@@ -245,7 +256,7 @@ snapshots/<run_id>/
     metrics_summary.json   every number, machine-readable (old keys kept; the new ones are under "accuracy")
     run_info.json          settings and provenance
     plots/                 loss_curve  pred_vs_obs  residual_hist  timeseries_sample  accuracy_by_station  geocp_coverage  lisa_map ...
-    tables/                accuracy_summary.csv  accuracy_by_station.csv  cv_folds.csv     (open in a spreadsheet)
+    tables/                accuracy_summary.csv  accuracy_by_station.csv  accuracy_by_year.csv  cv_folds.csv     (open in a spreadsheet)
     data/                  predictions_test.csv  predictions_calibration.csv  calibration_table.csv  geocp.json  spatial_bias.json ...
     surface/  explain/     from `infer` and `explain`
 ```
@@ -275,7 +286,7 @@ persistence yardstick).
 ### 2.6 Make the maps
 
 ```bash
-python run_pipeline.py --stage infer --date 2026-04-11
+python run_pipeline.py --stage infer --date 2025-07-01
 ```
 
 `infer` needs the GeoCP calibration of the run; if it has not been computed yet (for example right after `train`), `infer` runs `--stage geocp` first and says so. It also needs hourly readings for the three hours before each snapshot. The data covers 2024-08-13 12:00 to
@@ -303,9 +314,19 @@ run prints an estimate after the first chunk and progress lines afterwards, so y
 faster (`train.device: auto` uses it), but the installed PyTorch is the CPU-only build, so the laptop's GPU is not used yet.
 `inference.chunk_cells` (default 1024) bounds memory: the CNN needs about 1.2 GB at 1024 cells per chunk and 5.1 GB at 4096.
 
+**Dates from 2026 (OpenAQ-only history).** The Quezon City sensors have no readings from 2026, and a cell's history comes from its five
+nearest training stations. Where all five are Quezon City sensors there would be no history and no prediction (about 12 % of the cells,
+around Quezon City, on 2026-04-11). `inference.openaq_only_from_year: 2026` (the default) therefore builds the history of every hour of
+2026 or later from the nearest **OpenAQ** training stations only, so every cell is predicted. Hours before 2026 are unchanged. `infer` says
+which rule it used (a line when it starts, and `lag_stations` in `output_summary.json`), and `explain` follows the same rule. To go back to the
+old behaviour use `--override inference.openaq_only_from_year=null`; to move the switch use another year. Read these maps with two cautions:
+the five stations are farther away than in 2025 (OpenAQ is the sparser network: 32 of the 54 training stations in the `from_2024` dataset), and the model never saw a history made of
+OpenAQ stations alone. The by-year table in `SUMMARY.md` (section 5) shows how the test stations fared in 2026 (OpenAQ stations only).
+The option affects maps and Grad-CAM only: it does not change training, preprocessing or the test rows.
+
 `--date` expands to the four hours in `configs/inference.yaml` (`snapshot_hours: [8, 12, 17, 21]`);
-`--timestamp "2026-04-11 12:00"` (repeatable) gives explicit hours. Results go to
-`snapshots/<run_id>/surface/20260411/`:
+`--timestamp "2025-07-01 12:00"` (repeatable) gives explicit hours. Results go to
+`snapshots/<run_id>/surface/20250701/`:
 
 | File | Contents |
 |---|---|
@@ -357,7 +378,7 @@ that needs no key (mind its usage policy). The key is sent as `?key=<key>` on th
 `xyzservices` definition of the CARTO providers (used by `contextily`) writes it; if your key's instructions say
 otherwise, give the whole tile URL in `output.basemap_url` with `${CARTO_API_KEY}` where the key goes.
 
-**Grad-CAM.** `python run_pipeline.py --stage explain --timestamp "2026-04-11 12:00"` works on a snapshot made by
+**Grad-CAM.** `python run_pipeline.py --stage explain --timestamp "2025-07-01 12:00"` works on a snapshot made by
 `infer` for that date. It needs patches of at least 3 × 3 pixels (320 m / raster resolution), which the 10 m raster
 gives (32 × 32). It writes overlays for the highest- and lowest-predicted cells of the snapshot (`gradcam_hot_cells.png`,
 `gradcam_cold_cells.png`). Note that with a coarse `stride_px` the hot and cold cells are chosen from that coarse map.
@@ -485,6 +506,7 @@ The switches most often wanted:
 | skip the outer tuning loop | `tune.nested_evaluation` | `true`, `false` |
 | GeoCP weights normalised to one, or with the finite-sample correction | `geocp.finite_sample_correction` | `false`, `true` |
 | neighbours used for map cells | `inference.lag_reference` | `train`, `all` |
+| OpenAQ-only history from a year on | `inference.openaq_only_from_year` | `2026`, `null` (off) |
 | predict a coarser grid | `inference.stride_px` (odd) | `1`, `3`, `5` … |
 | basemap sources | `output.basemap.enabled`, `.web_tiles`, `.vector_layers`, `.strict` | `true`, `true`, `true`, `false` |
 | run LISA even if the global test is not significant | `report.bias.local_only_if_global_significant` | `true`, `false` |
@@ -770,7 +792,8 @@ the model; the only description is the spatial-lag paragraph of the preprocessin
 reading rely on neighbouring cells' values"), which is what this applies: at each lag hour the spatial lag of
 the cell's k nearest stations fills **both** the PM2.5 and the spatial-lag channels; the patch, hour encoding
 and scalers are exactly those of training. `inference.lag_reference: train` uses the training stations as
-neighbours (what the model and the calibration saw).
+neighbours (what the model and the calibration saw). From `inference.openaq_only_from_year` (2026) on, only the OpenAQ stations among them
+are used, because the Quezon City network has no readings then ([2.6](#26-make-the-maps)).
 
 Per date it writes the prediction volume with aligned lower / upper / width volumes, the 24-hour mean, AQI maps
 and `output_summary.json` (see [2.6](#26-make-the-maps)). The AQI scale is in `configs/output.yaml`: **Good
@@ -827,7 +850,7 @@ snapshots/<run_id>/
     SUMMARY.md  metrics_summary.json  run_info.json
     plots/    loss_curve.png  pred_vs_obs.png  residual_hist.png  timeseries_sample.png  accuracy_by_station.png
               geocp_coverage.png  lisa_map.png  lisa_on_bands.png
-    tables/   accuracy_summary.csv  accuracy_by_station.csv  cv_folds.csv
+    tables/   accuracy_summary.csv  accuracy_by_station.csv  accuracy_by_year.csv  cv_folds.csv
     data/     predictions_test.csv  predictions_calibration.csv  calibration_table.csv  geocp.json
               spatial_bias.json  residuals_by_cell.csv
     surface/<YYYYMMDD>/   prediction_volume.tif  lower_volume.tif  upper_volume.tif  width_volume.tif
@@ -873,6 +896,12 @@ State these when reporting results.
   Without an NCR boundary file the missing area cannot be measured exactly.
 - The raster is a rectangle, so maps also cover Manila Bay and the neighbouring provinces, and far from any sensor a
   prediction is mostly the nearest stations' values.
+- **The Quezon City sensors stop on 2025-12-31, and the spatial lag does not skip stations that are silent.** A cell's lag comes from its five
+  nearest training stations; where all five are Quezon City sensors there is no lag in 2026 (88.3 % of cells predicted on 2026-04-11, 100 % on
+  2025-07-01, at stride 21). Maps and Grad-CAM for 2026 or later therefore use the nearest OpenAQ training stations instead (`inference.openaq_only_from_year`,
+  [2.6](#26-make-the-maps)): every cell is predicted, from farther stations and with a history the model never saw in training. The model rows
+  are built differently and are not helped: OpenAQ station 6340868 (reports only from 2026-05, test partition) yields no model rows, so the test set
+  is effectively 16 stations, not 17. Choosing the nearest stations that actually report, in training too, would fix that; it is a method change and has not been made.
 - **The numbers in this file are from 2-epoch smoke runs** on 44 stations; the model has not been trained to
   convergence or tuned on this data yet.
 - The Quezon City sensors (`data/QC Data`) are converted by `preprocessing/qc_convert.py` ([2.1b](#21b-the-quezon-city-sensors-qc-data)) but `configs/data.yaml` still reads OpenAQ only until you point it at them.
@@ -895,7 +924,7 @@ State these when reporting results.
 
 ## 6. How it was checked
 
-`python -m pytest tests -q` runs 335 tests, 331 of which apply when `contextily` is installed (about 1 min), covering: configuration and the CRS check; the reset command; the infer / geocp workflow; the coverage check; the QC data conversion and the `qcdata_` loader; progress, hang detection and timeouts (also for the tune stage); the accuracy report and the snapshot layout, the map outline switch and the smooth band edges; shared-patch training; shapes and
+`python -m pytest tests -q` runs 378 tests, 374 of which apply when `contextily` is installed (about 1 min), covering: configuration and the CRS check; the reset command; the infer / geocp workflow; the coverage check; the QC data conversion and the `qcdata_` loader; progress, hang detection and timeouts (also for the tune stage); the accuracy report (including the by-year table) and the snapshot layout, the OpenAQ-only history for 2026 dates, the map outline switch and the smooth band edges, the combined datasets, pinned CV folds and the run-comparison tool; shared-patch training; shapes and
 gradient flow into both branches (pool and flatten); trainer and checkpoint round trips; metrics against
 hand-computed values; gap capping; patch/window alignment checked by hand; partitioning; the spatial lag
 (hand-computed, leakage, per-fold); scalers; GeoCP (normalisation, clipping, Table 4.2 metrics, zones, grid

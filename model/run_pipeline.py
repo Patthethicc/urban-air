@@ -253,7 +253,7 @@ def train(cfg: dict) -> str:
     Returns run_id (timestamp)."""
     from networks.dual_branch_net import DualBranchNet
     from preprocessing.scalers import Scalers
-    from preprocessing.spatial_partitioner import spatial_cv_folds
+    from preprocessing.spatial_partitioner import fold_settings, spatial_cv_folds
     from torch.utils.data import Subset
 
     from training.dataset import AirQualityDataset, load_meta
@@ -290,7 +290,7 @@ def train(cfg: dict) -> str:
     recomputer = SpatialLagRecomputer(cfg)
     best_epochs, oof_parts = [], []
     if tc["cv"]["enabled"]:
-        for k, (fit_idx, val_idx) in enumerate(spatial_cv_folds(meta_train, cfg["data"]["split"]["cv_folds"])):
+        for k, (fit_idx, val_idx) in enumerate(spatial_cv_folds(meta_train, cfg["data"]["split"]["cv_folds"], **fold_settings(cfg))):
             set_seed(tc["seed"] + k + 1)
             fold_ds, fit_idx, val_idx = recomputer.apply(train_ds, fit_idx, val_idx)   # lag from fit stations only
             fit_ds, val_ds = Subset(fold_ds, fit_idx), Subset(fold_ds, val_idx)
@@ -463,7 +463,7 @@ def infer(cfg: dict, run_id: str | None, timestamps: list[str], dates: list[str]
 
     Cells without a sensor take the spatial lag of their k nearest stations as PM2.5 history
     (configs/inference.yaml)."""
-    from inference.cell_inference import predict_surface
+    from inference.cell_inference import openaq_only, predict_surface, reference_stations
     from output.aqi_maps import basemap_settings, render_panels, render_snapshot, reset_basemap_state
     from output.volume import daily_mean, expand_dates, group_by_date, summarize_date, write_volume
     from training.run_info import write_json
@@ -484,6 +484,11 @@ def infer(cfg: dict, run_id: str | None, timestamps: list[str], dates: list[str]
         out_dir = Path(_paths(cfg)["snapshots_dir"]) / run_id / "surface" / date.strftime("%Y%m%d")
         (out_dir / "maps").mkdir(parents=True, exist_ok=True)
         labels = [t.strftime("%H:%M") for t in group]
+        only = openaq_only(group[0], cfg)                      # every hour of a date is in the same year
+        if only:
+            print(f"{date:%Y-%m-%d}: stand-in history from OpenAQ stations only (inference.openaq_only_from_year = "
+                  f"{cfg['inference']['openaq_only_from_year']}), {len(reference_stations(ctx['ref_ids'], ctx['ref_xy'], True, cfg)[0])} "
+                  "reference stations")
 
         preds, tr = predict_surface(ctx["model"], ctx["scalers"], ctx["padded"], ctx["shape"], ctx["transform"],
                                     ctx["hourly"], ctx["ref_ids"], ctx["ref_xy"], group, cfg, ctx["device"])
@@ -512,6 +517,7 @@ def infer(cfg: dict, run_id: str | None, timestamps: list[str], dates: list[str]
                             f"24-hour mean of {len(group)} snapshots, {date:%Y-%m-%d}", cfg, o["daily_guideline"], sensors)
         from output.aqi_maps import last_basemap
         summary = summarize_date(group, stack["prediction"], stack["width"], cfg)
+        summary["lag_stations"] = "OpenAQ only" if only else "all reference stations"
         summary["basemap"] = last_basemap() or "none"            # web | vectors | none (plain background)
         summary["basemap_settings"] = basemap_settings(cfg)
         write_json(out_dir / "output_summary.json", summary)
@@ -530,7 +536,7 @@ def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
 
     from explain.gradcam import attention_profile, grad_cam
     from explain.gradcam_plots import plot_cam_overlays
-    from inference.cell_inference import cell_temporal_features, gather_patches
+    from inference.cell_inference import cell_temporal_features, gather_patches, openaq_only, reference_stations
     from reporting.spatial_bias import band_names_for
     from training.run_info import write_json
 
@@ -566,14 +572,16 @@ def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
     names = band_names_for(_paths(cfg)["master_raster"], cfg)
     t_idx = int(round((ts - ctx["hourly"]["start"]) / pd.Timedelta(cfg["data"]["time"]["freq"])))
 
+    ref_ids, ref_xy = reference_stations(ctx["ref_ids"], ctx["ref_xy"], openaq_only(ts, cfg), cfg)    # the same rule as `infer`
+
     rows, summary = [], {"timestamp": str(ts), "patch_px": px, "attention_quantile": ex["attention_quantile"], "groups": {}}
     for group, flat in groups.items():
         r_out, c_out = np.unravel_index(flat, pred_map.shape)
         xs, ys = cell_xy_of(vol_transform, r_out, c_out, offset="center")
         r_pix, c_pix = (np.asarray(v) for v in rowcol(ctx["transform"], xs, ys))
         raw = gather_patches(ctx["padded"], r_pix, c_pix, px)
-        feats = cell_temporal_features(ctx["hourly"]["values"], ctx["hourly"]["location_ids"], ctx["ref_ids"],
-                                       ctx["ref_xy"], np.column_stack([xs, ys]), t_idx, ts, cfg)
+        feats = cell_temporal_features(ctx["hourly"]["values"], ctx["hourly"]["location_ids"], ref_ids, ref_xy,
+                                       np.column_stack([xs, ys]), t_idx, ts, cfg)
         keep = ~np.isnan(feats).any(axis=(1, 2))
         raw, feats, xs, ys = raw[keep], feats[keep], np.asarray(xs)[keep], np.asarray(ys)[keep]
         cam, p_scaled = grad_cam(ctx["model"], ctx["scalers"].transform_patches(raw),

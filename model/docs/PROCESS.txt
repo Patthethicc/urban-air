@@ -243,6 +243,11 @@ the calibration or test stations, and its hold-out stations are distinct from bo
 
 Metrics: the three of the text - RMSE, MAE and R2 - are the headline numbers (report.yaml metrics).
 IA and Pearson r are still computed and listed under "supplementary" (report.yaml extra_metrics).
+Choosing between datasets: data.split.cv_assignment (balanced | by_station) decides which stations share a CV fold; balanced (GroupKFold)
+balances folds by rows, so the groups move with the data, by_station uses a seeded shuffle of the station ids and keeps them fixed. The runs of
+different datasets are compared on out-of-fold predictions only (never the test partition), on the station-hours all runs share and agree on,
+by `python -m reporting.compare_runs` (mean/sd over seeds, station-cluster bootstrap CI of the gap to the best, fold-agreement check).
+
 Reading the accuracy (reporting/accuracy.py, reporting/summary.py): `report` writes snapshots/<run>/SUMMARY.md, the page to
 read first, and prints a short headline. Next to the three metrics it gives bias (mean predicted - observed), the share of
 predictions within +/-5 and +/-10 ug/m3 and the share in the right AQI band (report.yaml accuracy; the band share is only
@@ -368,6 +373,13 @@ training.checkpoint.load_model(path) rebuilds the network without guessing.
 
 11. KNOWN LIMITS (state these in the thesis)
 -------------------------------------------
+- The Quezon City sensors stop on 2025-12-31 and the spatial lag takes a cell's five nearest TRAINING stations whether or not they report:
+  in 2026 the cells (and the OpenAQ station 6340868, test partition, which reports only from 2026-05) whose five nearest are all QC sensors get
+  no lag, so no prediction (88.3 % of cells on 2026-04-11, 100 % on 2025-07-01) and no model rows (the test set is effectively 16 stations).
+  For maps and Grad-CAM, inference.openaq_only_from_year (default 2026) makes every hour of that year or later take its stand-in history from
+  the nearest OpenAQ training stations only, so every cell is predicted (null switches it off). The stations are farther away and the model never
+  saw a history made of one network. It does not change training or the test rows; fixing those would need the lag to come from the nearest
+  stations that report that hour (a method change, not made). SUMMARY.md section 5 gives the test accuracy per year.
 - The split is spatial only: every partition covers the same hours, so a regional weather episode
   appears in train and test. Scores measure generalisation to NEW LOCATIONS, not forecasting.
 - Fold-wise spatial lag changes the neighbour distances (fewer reference stations in a fold), so a

@@ -218,8 +218,27 @@ def build_markdown(summary: dict, info: dict, files: list[str]) -> str:
         L += [_table(["Station", "Network", "Rows", f"RMSE ({UG})", f"MAE ({UG})", "R²", "Bias", "Interval coverage"], srows, "llrrrrrr"), "",
               "![accuracy by station](plots/accuracy_by_station.png)", ""]
 
-    # ---- 5. uncertainty
-    L += ["## 5. Uncertainty: GeoCP intervals"]
+    # ---- 5. years
+    by = acc.get("by_year") or []
+    L += ["## 5. Accuracy by year"]
+    if len(by) > 1:
+        L += ["The test rows grouped by the calendar year of the hour that was predicted. The station mix is not the same in every "
+              "year, so the table says how many stations of each network were scored, and the mean observed level (a higher level "
+              "brings a larger error by itself). A year with few rows or few stations is noisy.", "",
+              _table(["Year", "Stations (OpenAQ / QC)", "Rows", f"Mean observed ({UG})", f"RMSE ({UG})", f"MAE ({UG})", "R²", "Bias"],
+                     [[r["year"], f"{r['stations_openaq']} / {r['stations_qc']}", f"{r['rows']:,}", _num(r["observed_mean"], 1),
+                       _num(r["rmse"]), _num(r["mae"]), _num(r["r2"], 3), _num(r["bias"], 2, True)] for r in by], "lrrrrrrr"), ""]
+        no_qc = [str(r["year"]) for r in by if not r["stations_qc"]] if any(r["stations_qc"] for r in by) else []
+        if no_qc:
+            L += [f"No QC station is scored in {', '.join(no_qc)} (that network had stopped reporting), so {'that year is' if len(no_qc) == 1 else 'those years are'} "
+                  "not directly comparable with the years that include QC stations.", ""]
+    elif by:
+        L += [f"The test rows all fall in {by[0]['year']}, so there is no year to compare: section 1 is that year.", ""]
+    else:
+        L += ["Not computed (the predictions have no timestamps).", ""]
+
+    # ---- 6. uncertainty
+    L += ["## 6. Uncertainty: GeoCP intervals"]
     if g:
         sel = geo["selected"]
         bw = ("unweighted (plain split conformal)" if sel["bandwidth_m"] is None or np.isinf(float(sel["bandwidth_m"]))
@@ -237,8 +256,8 @@ def build_markdown(summary: dict, info: dict, files: list[str]) -> str:
     else:
         L += ["GeoCP has not been run for this snapshot.", ""]
 
-    # ---- 6. spatial bias
-    L += ["## 6. Are the errors spatially clustered?"]
+    # ---- 7. spatial bias
+    L += ["## 7. Are the errors spatially clustered?"]
     sb = summary.get("spatial_bias")
     if sb and "global_moran" in sb:
         gm = sb["global_moran"]
@@ -248,9 +267,9 @@ def build_markdown(summary: dict, info: dict, files: list[str]) -> str:
     else:
         L += [(sb or {}).get("skipped", "Not computed for this run."), ""]
 
-    # ---- 7. training
+    # ---- 8. training
     cv = info.get("cv", [])
-    L += ["## 7. Training"]
+    L += ["## 8. Training"]
     if cv:
         L += [_table(["Fold", "Held-out stations", f"RMSE ({UG})", f"MAE ({UG})", "R²", "Best epoch"],
                      [[c["fold"], len(c.get("val_stations") or []), _num(c["metrics"]["rmse"]), _num(c["metrics"]["mae"]),
@@ -260,10 +279,10 @@ def build_markdown(summary: dict, info: dict, files: list[str]) -> str:
         L += [f"Final model: {ff['epochs']} epoch(s) on all training stations ({ff['epochs_source']}). "
               "Training curves: ![loss](plots/loss_curve.png)", ""]
 
-    # ---- 8. cautions
-    L += ["## 8. Read with care"] + [f"- {n}" for n in _cautions(summary, info)] + [""]
+    # ---- 9. cautions
+    L += ["## 9. Read with care"] + [f"- {n}" for n in _cautions(summary, info)] + [""]
 
-    # ---- 9. files
-    L += ["## 9. Files in this folder", "", _table(["File", "What it is"],
+    # ---- 10. files
+    L += ["## 10. Files in this folder", "", _table(["File", "What it is"],
           [[f"`{f}`", describe(f)] for f in files], "ll"), ""]
     return "\n".join(L)

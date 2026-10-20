@@ -114,6 +114,9 @@ split:                          # SPATIAL: by monitoring location, never by row 
   test_fraction: 0.2            # final spatial test stations, untouched until the end
   calibration_fraction: 0.2     # of the development stations, held out for GeoCP calibration
   cv_folds: 3                   # nested spatial GroupKFold inside the proper-training stations
+  cv_assignment: balanced       # which stations share a CV fold. balanced = sklearn GroupKFold, folds balanced by ROWS (so the
+                                #   groups change whenever the data does). by_station = a seeded shuffle of the station ids, the
+                                #   same groups for any dataset: use it when comparing datasets (docs/EXPERIMENT_CHECKLIST.md)
   seed: 42
   # optional hand-picked station lists override the fractions
   test_stations: []

@@ -91,6 +91,9 @@ def validate(cfg: dict) -> None:
     for key in ("test_fraction", "calibration_fraction"):
         if not 0 < split[key] < 1:
             raise ValueError(f"split.{key} must be in (0, 1), got {split[key]}")
+    from preprocessing.spatial_partitioner import CV_ASSIGNMENTS
+    if split.get("cv_assignment", "balanced") not in CV_ASSIGNMENTS:
+        raise ValueError(f"split.cv_assignment must be one of {CV_ASSIGNMENTS}, got {split['cv_assignment']!r}")
     if cfg["model"]["spatial_cnn"]["feature_map"] not in ("pool", "flatten"):
         raise ValueError("spatial_cnn.feature_map must be 'pool' or 'flatten'")
     if cfg["model"]["spatial_cnn"]["kernel_size"] % 2 == 0:
@@ -117,6 +120,9 @@ def validate(cfg: dict) -> None:
         raise ValueError("inference.stride_px must be odd (1, 3, 5, ...) so every output cell is centred on a pixel")
     if inf["lag_reference"] not in ("train", "all"):
         raise ValueError("inference.lag_reference must be 'train' or 'all'")
+    year = inf.get("openaq_only_from_year")
+    if year is not None and (isinstance(year, bool) or not isinstance(year, int) or not 2000 <= year <= 2100):
+        raise ValueError(f"inference.openaq_only_from_year must be a year such as 2026, or null to switch it off (got {year!r})")
     if cfg["tune"].get("search_epochs"):
         e = cfg["tune"].get("epochs_space") or {}
         if e.get("type") != "integer" or not 1 <= e.get("low", 0) < e.get("high", 0):

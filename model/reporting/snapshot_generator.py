@@ -59,13 +59,15 @@ def _read(snap: Path, name: str, **kw) -> pd.DataFrame:
     return pd.read_csv(snap_file(snap, name), **kw)
 
 
-def _tables(snap: Path, measures: dict, stations: list[dict], info: dict) -> None:
+def _tables(snap: Path, measures: dict, stations: list[dict], years: list[dict], info: dict) -> None:
     """The small spreadsheet-friendly CSVs."""
     labels = {"cross_validation": "cross-validation (out-of-fold)", "calibration": "calibration", "test": "test"}
     rows = [{"split": labels[k], **v} for k, v in measures.items()]
     pd.DataFrame(rows).to_csv(snap_file(snap, "accuracy_summary.csv", write=True), index=False)
     if stations:
         pd.DataFrame(stations).to_csv(snap_file(snap, "accuracy_by_station.csv", write=True), index=False)
+    if years:
+        pd.DataFrame(years).to_csv(snap_file(snap, "accuracy_by_year.csv", write=True), index=False)
     if info.get("cv"):
         pd.DataFrame([{"fold": c["fold"], "held_out_stations": len(c.get("val_stations") or []), "fit_rows": c.get("fit_rows"),
                        "val_rows": c.get("val_rows"), **{k: c["metrics"][k] for k in ("rmse", "mae", "r2")},
@@ -104,6 +106,7 @@ def generate_snapshot(run_id: str, cfg: dict, baseline: str | None = None) -> Pa
     measures["calibration"] = accuracy.measures(cal, cfg)
     measures["test"] = accuracy.measures(test, cfg)
     by_station = accuracy.by_station(test, cfg, (geocp.get("test") or {}).get("per_station"))
+    by_year = accuracy.by_year(test, cfg)
 
     summary = {
         "run_id": run_id,
@@ -116,7 +119,8 @@ def generate_snapshot(run_id: str, cfg: dict, baseline: str | None = None) -> Pa
                         **split_metrics(cal_metrics, cfg)},
         "cv_folds": [{"fold": f["fold"], "val_stations": f.get("val_stations"),
                       **split_metrics(f["metrics"], cfg)} for f in info.get("cv", [])],
-        "accuracy": {"measures": measures, "yardsticks": accuracy.persistence_reference(test, cfg), "by_station": by_station},
+        "accuracy": {"measures": measures, "yardsticks": accuracy.persistence_reference(test, cfg), "by_station": by_station,
+                     "by_year": by_year},
         "geocp": {k: geocp[k] for k in ("selected", "test") if k in geocp},
         "test_by_station": station_metrics(test, cfg),
         "parameters": info["parameters"],
@@ -131,7 +135,7 @@ def generate_snapshot(run_id: str, cfg: dict, baseline: str | None = None) -> Pa
         summary["spatial_bias"] = {k: bias[k] for k in ("cells", "global_moran", "cluster_counts", "skipped", "note")
                                    if k in bias}
     write_json(snap / "metrics_summary.json", summary)
-    _tables(snap, measures, by_station, info)
+    _tables(snap, measures, by_station, by_year, info)
 
     wanted = set(cfg["report"]["plots"])
     history_path = run_dir / "history.json"

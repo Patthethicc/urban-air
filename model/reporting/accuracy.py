@@ -5,10 +5,10 @@ agreement, and yardsticks (repeat the previous hour; always predict the average 
 import numpy as np
 import pandas as pd
 
+from preprocessing.qc_convert import ID_BASE as QC_ID_BASE     # location_ids from here up are the Quezon City sites
 from training import metrics as M
 
 DEFAULTS = {"tolerances_ugm3": [5, 10], "aqi_bands": True, "persistence": True}
-QC_ID_BASE = 9_000_000                     # location_id of the Quezon City sites (preprocessing/qc_convert.py)
 
 
 def settings(cfg: dict) -> dict:
@@ -92,3 +92,16 @@ def by_station(df: pd.DataFrame, cfg: dict, geocp_stations: list[dict] | None = 
             row["distance_to_nearest_calibration_m"] = float(cov[sid].get("distance_to_nearest_calibration_m", np.nan))
         rows.append(row)
     return sorted(rows, key=lambda r: -r["rmse"])
+
+
+def by_year(df: pd.DataFrame, cfg: dict) -> list[dict]:
+    """One row per calendar year of the target hour, oldest first. The station mix changes between years (the QC
+    network ends on 2025-12-31), so the number of stations of each network travels with the accuracy."""
+    if "timestamp" not in df.columns:
+        return []
+    rows = []
+    for year, g in df.groupby(df["timestamp"].dt.year):
+        ids = g["location_id"].unique()
+        rows.append({"year": int(year), **measures(g, cfg), "stations_openaq": int((ids < QC_ID_BASE).sum()),
+                     "stations_qc": int((ids >= QC_ID_BASE).sum()), "observed_mean": float(g["y_true"].mean())})
+    return rows

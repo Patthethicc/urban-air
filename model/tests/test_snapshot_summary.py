@@ -6,6 +6,7 @@ import pytest
 
 from networks.dual_branch_net import DualBranchNet
 from output.aqi_maps import categorize
+from preprocessing.qc_convert import ID_BASE
 from reporting import accuracy
 from reporting.layout import describe, snap_file
 from reporting.snapshot_generator import generate_snapshot
@@ -91,6 +92,43 @@ def test_stations_are_listed_worst_first_with_their_network(cfg):
     assert rows[1]["geocp_coverage"] == 0.9 and "geocp_coverage" not in rows[0]
 
 
+def _two_years():
+    """2025: one OpenAQ and one QC station, each wrong by 1 and 3; 2026: the OpenAQ station only, wrong by 2."""
+    t25, t26 = pd.date_range("2025-12-31 22:00", periods=2, freq="h"), pd.date_range("2026-01-01 00:00", periods=3, freq="h")
+    rows = [(5, t25, 1.0), (9_000_001, t25, 3.0), (5, t26, 2.0)]
+    return pd.concat([pd.DataFrame({"location_id": sid, "timestamp": t, "y_true": 20.0 + np.arange(len(t)) * 10.0,
+                                    "y_pred": 20.0 + np.arange(len(t)) * 10.0 + err}) for sid, t, err in rows], ignore_index=True)
+
+
+def test_accuracy_is_split_by_the_calendar_year_of_the_predicted_hour_with_the_stations_of_each_network(cfg):
+    rows = accuracy.by_year(_two_years(), cfg)
+    assert [r["year"] for r in rows] == [2025, 2026]                                  # oldest first, and the year boundary splits the hours
+    a, b = rows
+    assert (a["rows"], a["stations"], a["stations_openaq"], a["stations_qc"]) == (4, 2, 1, 1)
+    assert (b["rows"], b["stations"], b["stations_openaq"], b["stations_qc"]) == (3, 1, 1, 0)
+    assert a["rmse"] == pytest.approx(np.sqrt((1 + 1 + 9 + 9) / 4)) and a["bias"] == pytest.approx(2.0)
+    assert b["rmse"] == pytest.approx(2.0) and b["mae"] == pytest.approx(2.0) and b["observed_mean"] == pytest.approx(30.0)
+    assert accuracy.by_year(_two_years().drop(columns="timestamp"), cfg) == []        # nothing to group by
+    edge = pd.DataFrame({"location_id": [ID_BASE - 1, ID_BASE], "timestamp": pd.Timestamp("2025-06-01"), "y_true": 10.0, "y_pred": 11.0})
+    assert (accuracy.by_year(edge, cfg)[0]["stations_openaq"], accuracy.by_year(edge, cfg)[0]["stations_qc"]) == (1, 1)   # QC starts at ID_BASE
+
+
+def test_the_year_table_reads_the_stations_and_says_when_a_network_is_missing(cfg):
+    s = _summary()
+    s["accuracy"]["by_year"] = accuracy.by_year(_two_years(), cfg)
+    md = build_markdown(s, _info(cfg), ["SUMMARY.md"])
+    assert "## 5. Accuracy by year" in md
+    assert "| 2025 | 1 / 1 | 4 | 25.0 |" in md and "| 2026 | 1 / 0 | 3 | 30.0 | 2.00 | 2.00 |" in md
+    assert "No QC station is scored in 2026 (that network had stopped reporting), so that year is not directly comparable" in md
+
+    s["accuracy"]["by_year"] = [{**r, "stations_qc": 0} for r in s["accuracy"]["by_year"]]       # no QC data at all: nothing to warn about
+    assert "No QC station" not in build_markdown(s, _info(cfg), ["SUMMARY.md"])
+    s["accuracy"]["by_year"] = s["accuracy"]["by_year"][:1]
+    assert "all fall in 2025, so there is no year to compare" in build_markdown(s, _info(cfg), ["SUMMARY.md"])
+    s["accuracy"].pop("by_year")
+    assert "Not computed (the predictions have no timestamps)" in build_markdown(s, _info(cfg), ["SUMMARY.md"])
+
+
 # ------------------------------------------------------------------------------ the folder layout
 def test_files_are_written_into_subfolders_and_read_from_old_flat_snapshots(tmp_path):
     new = snap_file(tmp_path, "predictions_test.csv", write=True)
@@ -164,8 +202,8 @@ def test_the_headline_gives_accuracy_the_yardstick_and_the_interval_in_a_few_lin
 def test_the_report_has_every_section_and_explains_each_number(cfg):
     md = build_markdown(_summary(), _info(cfg), ["SUMMARY.md", "plots/loss_curve.png"])
     for heading in ("## 1. Headline", "## 2. Is that good?", "## 3. Does the accuracy hold", "## 4. Accuracy by test station",
-                    "## 5. Uncertainty", "## 6. Are the errors spatially clustered", "## 7. Training", "## 8. Read with care",
-                    "## 9. Files in this folder"):
+                    "## 5. Accuracy by year", "## 6. Uncertainty", "## 7. Are the errors spatially clustered", "## 8. Training",
+                    "## 9. Read with care", "## 10. Files in this folder"):
         assert heading in md
     assert "| R² | 0.750 |" in md and "Guessing 'Good' every time scores 76.0 %" in md
     assert "Repeat the previous hour (persistence)" in md and "Skill against persistence: **+11%**" in md
@@ -198,7 +236,7 @@ def _make_run(cfg, tmp_path, flat: bool):
     ckpt.mkdir(parents=True)
     (snap if flat else snap / "data").mkdir(parents=True)
     rng = np.random.default_rng(0)
-    t = pd.date_range("2025-03-01", periods=240, freq="h")
+    t = pd.date_range("2025-12-27", periods=240, freq="h")                            # crosses into 2026: two years in the by-year table
 
     def frame(ids):
         rows = []
@@ -242,7 +280,8 @@ def test_a_snapshot_is_written_into_subfolders_with_a_report_whichever_layout_it
 
     for rel in ("SUMMARY.md", "metrics_summary.json", "run_info.json", "plots/pred_vs_obs.png", "plots/loss_curve.png",
                 "plots/residual_hist.png", "plots/timeseries_sample.png", "plots/geocp_coverage.png",
-                "plots/accuracy_by_station.png", "tables/accuracy_summary.csv", "tables/accuracy_by_station.csv", "tables/cv_folds.csv"):
+                "plots/accuracy_by_station.png", "tables/accuracy_summary.csv", "tables/accuracy_by_station.csv",
+                "tables/accuracy_by_year.csv", "tables/cv_folds.csv"):
         assert (snap / rel).is_file() and (snap / rel).stat().st_size > 50, rel
     assert not (snap / "pred_vs_obs.png").exists() and not (snap / "loss_curve.png").exists()     # plots are no longer in the top folder
 
@@ -252,11 +291,15 @@ def test_a_snapshot_is_written_into_subfolders_with_a_report_whichever_layout_it
     assert t["bias"] == pytest.approx(-1.0, abs=0.4) and 0.5 < t["within_5"] < 1.0 and t["stations"] == 3
     assert set(summary["accuracy"]["measures"]) == {"cross_validation", "calibration", "test"}
     assert summary["accuracy"]["yardsticks"]["rows"] > 600 and len(summary["accuracy"]["by_station"]) == 3
+    years = summary["accuracy"]["by_year"]
+    assert [y["year"] for y in years] == [2025, 2026] and sum(y["rows"] for y in years) == 720        # 3 stations x 240 hours, split at midnight
+    assert pd.read_csv(snap / "tables" / "accuracy_by_year.csv")["year"].tolist() == [2025, 2026]
 
     table = pd.read_csv(snap / "tables" / "accuracy_summary.csv")
     assert table["split"].tolist() == ["cross-validation (out-of-fold)", "calibration", "test"]
     md = (snap / "SUMMARY.md").read_text(encoding="utf-8")
     assert "## 1. Headline" in md and "plots/loss_curve.png" in md and "`tables/accuracy_summary.csv`" in md
+    assert "## 5. Accuracy by year" in md and "| 2026 | 3 / 0 | 360 |" in md and "`tables/accuracy_by_year.csv`" in md
     assert (tmp_path / "checkpoints" / "runs_index.csv").is_file()
 
 

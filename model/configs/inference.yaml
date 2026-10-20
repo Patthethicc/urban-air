@@ -9,6 +9,11 @@ snapshot_hours: [8, 12, 17, 21]   # Output.txt: morning commute peak, midday bas
                                   # (--date expands to these hours; --timestamp gives explicit hours)
 lag_reference: train    # train = neighbours are the proper-training stations (what the model and the GeoCP
                         #         calibration saw); all = every station with data
+openaq_only_from_year: 2026   # hours of this year and later take their stand-in history from the OpenAQ stations ONLY
+                        # (null = always every reference station). The Quezon City sensors stopped on 2025-12-31, so from 2026
+                        # the 5 nearest stations of a cell around Quezon City are often all silent and the cell would get no
+                        # prediction (about 12 % of the map); choosing the 5 nearest OpenAQ stations fills those cells, from
+                        # farther away. The year of the hour being predicted decides. Applies to `infer` and `explain`.
 stride_px: 1            # predict every Nth pixel in each direction (must be odd). 1 = every cell.
                         # A 10 m raster of the whole NCR has ~10^7 cells: raise this or use `window` for a first look.
 chunk_cells: 1024       # cells per forward pass. Measured on the 10 m raster (32 x 32 patches): the CNN needs ~1.2 GB extra RAM

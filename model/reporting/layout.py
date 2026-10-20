@@ -17,7 +17,7 @@ SUBDIR = {
     "loss_curve.png": "plots", "pred_vs_obs.png": "plots", "residual_hist.png": "plots",
     "timeseries_sample.png": "plots", "accuracy_by_station.png": "plots", "geocp_coverage.png": "plots",
     "lisa_map.png": "plots", "lisa_on_bands.png": "plots",
-    "accuracy_summary.csv": "tables", "accuracy_by_station.csv": "tables", "cv_folds.csv": "tables",
+    "accuracy_summary.csv": "tables", "accuracy_by_station.csv": "tables", "accuracy_by_year.csv": "tables", "cv_folds.csv": "tables",
     "predictions_test.csv": "data", "predictions_calibration.csv": "data", "calibration_table.csv": "data",
     "residuals_by_cell.csv": "data", "geocp.json": "data", "spatial_bias.json": "data",
 }
@@ -36,6 +36,7 @@ DESCRIPTIONS = {
     "plots/lisa_on_bands.png": "the residual clusters over the morphology bands (only when LISA ran)",
     "tables/accuracy_summary.csv": "accuracy per data partition, one row each",
     "tables/accuracy_by_station.csv": "accuracy and interval coverage of every test station",
+    "tables/accuracy_by_year.csv": "test accuracy per calendar year, with the number of stations of each network",
     "tables/cv_folds.csv": "accuracy of every cross-validation fold",
     "data/predictions_test.csv": "every test prediction with its interval",
     "data/predictions_calibration.csv": "every calibration prediction",

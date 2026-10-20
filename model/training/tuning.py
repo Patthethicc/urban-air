@@ -28,7 +28,7 @@ from torch.utils.data import Subset
 
 from networks.dual_branch_net import DualBranchNet
 from preprocessing.scalers import Scalers
-from preprocessing.spatial_partitioner import nested_spatial_folds, spatial_cv_folds
+from preprocessing.spatial_partitioner import fold_settings, nested_spatial_folds, spatial_cv_folds
 import runtime_guard
 from runtime_guard import format_duration
 from seed import set_seed
@@ -258,7 +258,7 @@ def nested_tuning(cfg: dict) -> Path:
 
     outer_results = []
     if nested:
-        for k, (fit, test, inner) in enumerate(nested_spatial_folds(meta, t["outer_folds"], t["inner_folds"])):
+        for k, (fit, test, inner) in enumerate(nested_spatial_folds(meta, t["outer_folds"], t["inner_folds"], **fold_settings(cfg))):
             print(f"--- outer fold {k} (search {k + 1}/{searches}): "
                   f"{len(set(meta.iloc[test]['location_id']))} held-out stations", flush=True)
             res = gp_search(make_objective(cfg, dataset, inner, stride, seed + 100 * k, recomputer),
@@ -286,7 +286,7 @@ def nested_tuning(cfg: dict) -> Path:
             print(f"[outer {k}] tuned model on held-out stations: RMSE {metrics['rmse']:.3f}  MAE {metrics['mae']:.3f}")
 
     print(f"--- final search over all training stations (search {searches}/{searches})", flush=True)
-    final = gp_search(make_objective(cfg, dataset, spatial_cv_folds(meta, t["inner_folds"]), stride, seed, recomputer),
+    final = gp_search(make_objective(cfg, dataset, spatial_cv_folds(meta, t["inner_folds"], **fold_settings(cfg)), stride, seed, recomputer),
                       effective_space(t), t, tune_dir / "search_final.json", tag="[final]", searches=searches)
     write_json(tune_dir / "best_hyperparameters.json",
                {"hyperparameters": final["best_hyperparameters"], "inner_cv_loss": final["best_loss"],

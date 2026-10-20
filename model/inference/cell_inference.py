@@ -12,6 +12,7 @@ model's error with real histories.
 import numpy as np
 import pandas as pd
 
+from preprocessing.qc_convert import ID_BASE as QC_ID_BASE
 from preprocessing.spatial_lag import nearest_station_weights
 from runtime_guard import format_duration, guarded  # format_duration is also imported from here by older callers
 
@@ -42,7 +43,7 @@ def standin_series(values: np.ndarray, column_ids, ref_ids, ref_xy: np.ndarray, 
                    hour_idx: np.ndarray, cfg: dict, neighbours=None) -> np.ndarray:
     """Spatial lag of every cell at the given hours: [len(hour_idx), n_cells], NaN where none of the
     cell's k nearest reference stations reported. `values` [H, S] hourly PM2.5, columns = `column_ids`.
-    `neighbours` = (idx, w) from nearest_station_weights for these cells, when already computed."""
+    `neighbours` = (idx, w) from nearest_station_weights for these cells and these ref_xy, when already computed."""
     col = {int(c): i for i, c in enumerate(column_ids)}
     ref_cols = np.array([col[int(r)] for r in ref_ids])
     idx, w = neighbours if neighbours is not None else nearest_station_weights(cell_xy, ref_xy, cfg)   # [n, k]
@@ -52,6 +53,26 @@ def standin_series(values: np.ndarray, column_ids, ref_ids, ref_xy: np.ndarray, 
     den = (seen * w[None]).sum(axis=-1)
     with np.errstate(invalid="ignore", divide="ignore"):
         return np.where(den > 0, num / den, np.nan)
+
+
+def openaq_only(timestamp, cfg: dict) -> bool:
+    """True when the stand-in history of this hour may only use OpenAQ stations: its year is at or after
+    inference.openaq_only_from_year (null = never). The year of the hour being predicted decides, not the year of its lags."""
+    year = cfg["inference"].get("openaq_only_from_year")
+    return year is not None and pd.Timestamp(timestamp).year >= int(year)
+
+
+def reference_stations(ref_ids, ref_xy, only_openaq: bool, cfg: dict):
+    """(ids, xy) of the stations whose readings may form the stand-in history: all the reference stations, or just the
+    OpenAQ ones (the Quezon City network has ids from qc_convert.ID_BASE up)."""
+    if not only_openaq:
+        return ref_ids, ref_xy
+    keep = np.array([int(r) < QC_ID_BASE for r in ref_ids])
+    if not keep.any():
+        raise ValueError(f"inference.openaq_only_from_year = {cfg['inference']['openaq_only_from_year']} asks for OpenAQ stations only, "
+                         f"but none of the {len(ref_ids)} reference stations (inference.lag_reference = {cfg['inference']['lag_reference']}) "
+                         "is an OpenAQ station; set it to null to use every reference station")
+    return [r for r, k in zip(ref_ids, keep) if k], np.asarray(ref_xy)[keep]
 
 
 def _first_history_hour(t_idx: int, cfg: dict) -> int:
@@ -128,6 +149,9 @@ def predict_surface(model, scalers, padded: np.ndarray, shape, transform, hourly
     and the embedding once and reuses them for all hours (`reuse_embeddings`; same result as one forward pass per hour,
     which is what a temporal-only or forward-only model gets).
 
+    From inference.openaq_only_from_year on, the hours of that year take their stand-in history from the OpenAQ reference
+    stations only (`reference_stations`); earlier hours keep every reference station.
+
     hourly = {'values': [H, S], 'location_ids': [S], 'start': Timestamp}."""
     import time
 
@@ -139,6 +163,8 @@ def predict_surface(model, scalers, padded: np.ndarray, shape, transform, hourly
     single = isinstance(timestamps, (str, pd.Timestamp))
     stamps = [pd.Timestamp(t) for t in ([timestamps] if single else timestamps)]
     t_idx = [_hour_index(ts, hourly, cfg) for ts in stamps]                    # fail fast, before any chunk
+    only = [openaq_only(ts, cfg) for ts in stamps]
+    refs = {flag: reference_stations(ref_ids, ref_xy, flag, cfg) for flag in set(only)}   # flag -> (ids, xy)
 
     inf = cfg["inference"]
     stride, px = int(inf["stride_px"]), int(cfg["derived"]["patch_px"])
@@ -163,9 +189,12 @@ def predict_surface(model, scalers, padded: np.ndarray, shape, transform, hourly
         for i, a in enumerate(range(0, total, chunk), 1):
             guard.beat(f"chunk {i}/{n_chunks}, cells {a:,}-{min(a + chunk, total):,} of {total:,} {across}")
             sl = slice(a, a + chunk)
-            neighbours = nearest_station_weights(cell_xy[sl], ref_xy, cfg)
-            raw = [cell_temporal_features(hourly["values"], hourly["location_ids"], ref_ids, ref_xy, cell_xy[sl], ti, ts,
-                                          cfg, neighbours) for ti, ts in zip(t_idx, stamps)]
+            neighbours = {flag: nearest_station_weights(cell_xy[sl], xy, cfg) for flag, (_, xy) in refs.items()}
+            raw = []
+            for ti, ts, flag in zip(t_idx, stamps, only):
+                ids, xy = refs[flag]
+                raw.append(cell_temporal_features(hourly["values"], hourly["location_ids"], ids, xy, cell_xy[sl], ti, ts, cfg,
+                                                  neighbours[flag]))
             ok = np.stack([~np.isnan(r).any(axis=(1, 2)) for r in raw])                      # [hours, n]
             union = ok.any(axis=0)
             if union.any():
