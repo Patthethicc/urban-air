@@ -192,7 +192,7 @@ def tune_and_evaluate(X_arm, y, df_train, outer_fold, inner_map, n_trials, rando
 
     @use_named_args(SEARCH_SPACE)
     def objective(**params):
-        inner_rmses, best_iters = [], []
+        inner_rmses, inner_r2s, best_iters = [], [], []
         for inner_f in sorted(set(inner_labels)):
             itr = inner_labels != inner_f
             ite = inner_labels == inner_f
@@ -203,9 +203,15 @@ def tune_and_evaluate(X_arm, y, df_train, outer_fold, inner_map, n_trials, rando
             preds = model.predict(X_tr[ite])
             # inner-loop selection stays in log1p units (monotonic transform, same ranking)
             inner_rmses.append(sqrt(mean_squared_error(y_tr[ite], preds)))
+            # R2 on the ug/m3 scale (not log1p): this is the figure the results tables quote, and it is
+            # the number a reader can compare with the outer-fold R2 printed a few lines later.
+            _act, _pred = np.expm1(y_tr[ite]), np.expm1(preds)
+            _ss_tot = float((( _act - _act.mean()) ** 2).sum())
+            inner_r2s.append(1.0 - float(((_act - _pred) ** 2).sum()) / _ss_tot if _ss_tot else np.nan)
             best_iters.append(model.best_iteration)
         avg_rmse = float(np.mean(inner_rmses))
-        call_records.append({'params': dict(params), 'avg_rmse': avg_rmse,
+        avg_r2 = float(np.nanmean(inner_r2s))
+        call_records.append({'params': dict(params), 'avg_rmse': avg_rmse, 'avg_r2': avg_r2,
                              'avg_best_iteration': float(np.mean(best_iters))})
         return avg_rmse
 
@@ -225,13 +231,20 @@ def tune_and_evaluate(X_arm, y, df_train, outer_fold, inner_map, n_trials, rando
         per_trial = elapsed / max(1, done)
         eta = per_trial * max(0, n_trials - done)
         mark = '  <- best' if cur <= best else ''
-        print(f"      trial {done:2d}/{n_trials}  inner_rmse {cur:.5f}  best {best:.5f}"
-              f"{mark}  {elapsed:5.0f}s  eta {eta:4.0f}s", flush=True)
+        cur_r2 = call_records[-1]['avg_r2'] if call_records else float('nan')
+        best_i = int(np.argmin(res.func_vals))
+        best_r2 = call_records[best_i]['avg_r2'] if best_i < len(call_records) else float('nan')
+        print(f"      trial {done:2d}/{n_trials}  inner_rmse {cur:.5f}  inner_r2 {cur_r2:.4f}  "
+              f"best {best:.5f} (r2 {best_r2:.4f}){mark}  {elapsed:5.0f}s  eta {eta:4.0f}s",
+              flush=True)
 
     if verbose:
         print(f"    fold {outer_fold}: tuning ({n_trials} trials x {n_inner} inner folds, "
               f"{len(X_tr):,} train rows) ...", flush=True)
 
+    # skopt insists on n_calls > n_initial_points. Keep the thesis setting (8) but shrink the random
+    # phase for deliberately short searches, so `--n-trials 3` gives a quick read instead of a crash.
+    n_initial_points = max(2, min(n_initial_points, n_trials - 1))
     gp_minimize(objective, SEARCH_SPACE, n_calls=n_trials, n_initial_points=n_initial_points,
                 acq_func='EI', random_state=random_state, verbose=False,
                 callback=_progress if verbose else None)
@@ -243,6 +256,7 @@ def tune_and_evaluate(X_arm, y, df_train, outer_fold, inner_map, n_trials, rando
 
     if verbose:
         print(f"    fold {outer_fold}: search done, best inner_rmse {best_call['avg_rmse']:.5f} "
+              f"inner_r2 {best_call.get('avg_r2', float('nan')):.4f} "
               f"-> n_estimators={best_n_estimators}; fitting final model on {len(X_tr):,} rows ...",
               flush=True)
 
@@ -259,6 +273,7 @@ def tune_and_evaluate(X_arm, y, df_train, outer_fold, inner_map, n_trials, rando
         'n_test_cells': len(held_out_cells),
         'test_cells': ';'.join(str(c) for c in held_out_cells),
         'inner_rmse_log1p': round(float(best_call['avg_rmse']), 4),
+        'inner_r2': round(float(best_call.get('avg_r2', float('nan'))), 4),
         'rmse': float(sqrt(mean_squared_error(actual_raw, preds_raw))),
         'mae': float(mean_absolute_error(actual_raw, preds_raw)),
         'r2': float(r2_score(actual_raw, preds_raw)),
