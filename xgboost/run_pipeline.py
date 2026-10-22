@@ -242,6 +242,9 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--stage', required=True, choices=STAGES)
     ap.add_argument('--n-trials', type=int, default=20)
+    ap.add_argument('--arms', nargs='+', default=None,
+                    choices=['A', 'B', 'C', 'C+', 'TEXTURE'],
+                    help='ablation arms to run (default: A B C)')
     ap.add_argument('--alpha', type=float, default=0.10)
     ap.add_argument('--h-mode', default='thesis-grid',
                     choices=('thesis-grid', 'median-distance'))
@@ -286,7 +289,7 @@ def main():
     elif args.stage == 'patch':
         stage_patch()
     elif args.stage == 'ablation':
-        stage_ablation(args.n_trials, smoke=args.smoke)
+        stage_ablation(args.n_trials, arms=args.arms or ('A', 'B', 'C'), smoke=args.smoke)
     elif args.stage == 'test':
         stage_test(args.test_arm)
     elif args.stage == 'figures':
@@ -308,7 +311,7 @@ def main():
         stage_split()
         stage_patch()
         stage_report()
-        stage_ablation(args.n_trials, smoke=args.smoke)
+        stage_ablation(args.n_trials, arms=args.arms or ('A', 'B', 'C'), smoke=args.smoke)
         stage_test(args.test_arm)
         stage_geocp(args.alpha, args.h_mode, args.max_cal, args.max_eval,
                     args.geocp_profile)
