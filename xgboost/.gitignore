@@ -1,0 +1,6 @@
+data/
+outputs/
+.tile_cache/
+__pycache__/
+.ipynb_checkpoints/
+.env
