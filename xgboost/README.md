@@ -23,61 +23,83 @@ borrowed here: the stand-in history for unmonitored cells and the raster/extent 
 
 ## Repository structure
 
-The repository root **is** the `XGBoost/` folder — paths below are relative to it. Only source code and
-documentation are versioned: 45 files, 4.1 MB.
+The repository root **is** this branch — paths below are relative to it. It sits in `xgboost/` of the
+thesis repository, beside the CNN-LSTM (`model/`) and the pilot record, but nothing outside this folder is
+needed to run anything here. Only source code and documentation are versioned: **48 files, 0.47 MB**.
 
 ```
-.
-├── README.md                      this file
-├── requirements.txt               pinned versions
-├── .env.example                   XGB_DATASET / XGB_FOLDS / cleaning switches  (copy to .env)
-│
-├── run_pipeline.py                staged entry point
-│                                  split | patch | report | ablation | test | geocp | save | infer | figures
-├── ablation.py                    the five-arm experiment (CLI)
-├── geocp.py                       interval entry point (CLI)
-├── data.py                        resolves every path; reads .env
-├── ingest_sources.py              raw per-sensor CSVs -> Master_DL_Ready_full.csv
-├── build_morphology_grid.py       10 m raster -> 500 m grid + sensor_locations.csv
-├── xgboost_full.ipynb             the deliverable notebook (local and Kaggle)
+xgboost/                          this branch  — 48 files, 0.47 MB
+├── README.md                   38.1 KB  this file
+├── GUIDE.md                     7.5 KB  cell-by-cell guide + glossary
+├── .env.example                 0.5 KB  XGB_DATASET / XGB_FOLDS / cleaning switches
+├── requirements.txt             0.8 KB  pinned versions
+├── data.py                      7.2 KB  resolves every path; reads .env
+├── run_pipeline.py             15.0 KB  staged entry point
+├── build_morphology_grid.py     6.9 KB  10 m raster -> 500 m grid + sensor_locations.csv
+├── ingest_sources.py           12.8 KB  raw per-sensor CSVs -> Master_DL_Ready_full.csv
+├── xgboost_full.ipynb          32.8 KB  the notebook, local and Kaggle
 │
 ├── preprocessing/
-│   ├── prep.py                    merge -> EDA cleaning -> gap-aware lags -> features -> spatial lag
-│   ├── spatial_cv.py              k-means spatial folds, partitions, JSON persistence
-│   ├── grid_builder.py            vector grid + zonal statistics
-│   ├── patch_stats.py             10 m patch statistics for the TEXTURE arm
-│   └── spatial_bias.py            Moran's I / LISA on out-of-fold residuals
+│   ├── __init__.py
+│   ├── prep.py                 23.6 KB  merge -> EDA cleaning -> lags -> features -> spatial lag
+│   ├── spatial_cv.py           21.5 KB  k-means spatial folds, partitions, JSON persistence
+│   ├── grid_builder.py          9.6 KB  vector grid + zonal statistics
+│   ├── patch_stats.py           6.0 KB  10 m patch statistics for the TEXTURE arm
+│   └── spatial_bias.py          4.2 KB  Moran's I / LISA on out-of-fold residuals
 │
 ├── training/
-│   ├── ablation.py                five arms + nested spatial CV + Bayesian search
-│   ├── shared_split.py            writes the 54/13/16 split (station ids are literals)
-│   ├── partitions.py              rebuilds this branch's own split; refuses to clobber the shared one
-│   ├── final_test.py              scores the 16 reserved test stations
-│   ├── artifacts.py               model.joblib + run_info.json + features.json
-│   └── ablation_outputs.py        guard for the regenerable large outputs
+│   ├── __init__.py
+│   ├── ablation.py             20.0 KB  five arms + nested spatial CV + Bayesian search
+│   ├── shared_split.py          7.4 KB  writes the 54/13/16 split (station ids are literals)
+│   ├── partitions.py            9.1 KB  this branch's own split; refuses to clobber the shared one
+│   ├── final_test.py            8.0 KB  scores the 16 reserved test stations
+│   ├── artifacts.py             5.2 KB  model.joblib + run_info.json + features.json
+│   └── ablation_outputs.py      1.8 KB  guard for the regenerable large outputs
 │
 ├── uncertainty/
-│   ├── geocp.py                   GeoCP, split conformal, bandwidth search, batched quantiles
-│   └── geocp_shared.py            the CNN-LSTM-matched kernel x bandwidth search
+│   ├── __init__.py
+│   ├── geocp.py                39.6 KB  GeoCP, split conformal, bandwidth search, batched quantiles
+│   └── geocp_shared.py          8.2 KB  the CNN-LSTM-matched kernel x bandwidth search
 │
 ├── inference/
-│   └── cell_inference.py          per-cell stand-in history at one hour
+│   ├── __init__.py
+│   └── cell_inference.py       14.7 KB  per-cell stand-in history at one hour
 │
 ├── maps/
-│   ├── surfaces.py                per-snapshot maps, 2x2 panel, 24-hour mean
-│   └── basemap.py                 OSM tiles (keyless, no contextily required)
+│   ├── __init__.py
+│   ├── basemap.py              12.6 KB  OSM tiles, keyless; cache in .tile_cache or data/
+│   └── surfaces.py             25.5 KB  per-snapshot maps, 2x2 panel, 24-hour mean
 │
 ├── reporting/
-│   ├── dataset_report.py          Deliverable 1
-│   └── figures.py                 the nine report figures
+│   ├── __init__.py
+│   ├── dataset_report.py       18.4 KB  Deliverable 1
+│   └── figures.py              18.8 KB  the nine report figures, including SHAP
 │
-├── experiments/                   each backs a number quoted in this README
-│   ├── target_transform.py        log1p vs raw vs standardised
-│   ├── persistence_by_fold.py     model vs 1-hour persistence, per fold
-│   ├── eda_cleaning_impact.py     paired A/B of the EDA cleaning
-│   └── cohort_window.py           2024-01+ cohort-aware sensitivity
+├── experiments/                        each backs a number quoted in this README
+│   ├── target_transform.py      4.7 KB  log1p vs raw vs standardised
+│   ├── persistence_by_fold.py   3.3 KB  model vs 1-hour persistence, per fold
+│   ├── eda_cleaning_impact.py   3.1 KB  paired A/B of the EDA cleaning
+│   └── cohort_window.py         3.8 KB  2024-01+ cohort-aware sensitivity
 │
-├── data/                          NOT versioned — inputs + stage-written tables
+└── checks/                             self-tests; none is imported by the pipeline
+    ├── __init__.py
+    ├── run_notebook.py          2.5 KB  executes the notebook through nbconvert
+    ├── run_notebook_inprocess.py 4.3 KB  executes it in-process, cell by cell
+    ├── verify_shared_split.py   6.7 KB  the 54/13/16 partition is reproducible
+    ├── verify_ablation.py      10.3 KB  ablation numbers against the saved predictions
+    ├── verify_geocp.py         10.4 KB  GeoCP coverage and width
+    ├── test_notebook_flow.py    6.8 KB  every stage the notebook calls
+    ├── test_spatial_lag.py      5.7 KB  the fold-aware spatial lag
+    ├── check_morphology_coverage.py 3.0 KB
+    ├── check_output_coherence.py    8.8 KB
+    └── adversarial_step3.py    15.5 KB```
+
+`data/` and `outputs/` are **not versioned** — every file in them is either a raw input or written by a
+stage. They exist only in a working copy:
+
+```
+xgboost/                           (only in a working copy, never committed)
+├── data/                          inputs + stage-written tables
 │   ├── OpenAQ/                    45 raw CSVs                          39 MB
 │   ├── QC Data Converted/         41 raw CSVs                         112 MB
 │   ├── master_raster_v2.tif       10 m morphology, 5 bands             87 MB
@@ -89,21 +111,63 @@ documentation are versioned: 45 files, 4.1 MB.
 │   ├── imputed_cells.json / imputed_texture_cells.json / ingest_report.json
 │   └── 20261016_070432/           the CNN-LSTM reference run (quoted, not used)
 │
-└── outputs/                       NOT versioned — every file is generated
-    ├── ablation_{results,summary}.csv       15 rows: 5 arms x 3 folds
-    ├── test_metrics_all.csv                 one row per scored arm
-    ├── test_metrics_<arm>.csv, predictions_test_<arm>.csv
-    ├── oof_predictions_<arm>.csv            ~100 MB per arm
-    ├── dataset_report.md                    Deliverable 1
-    ├── figures/                             9 figures + arm_comparison(.png/_bars.png)
-    ├── geocp_shared/                        geocp.json, candidates, test intervals
-    ├── surfaces/<date>/                     per-hour CSV + GeoTIFF + AQI map + continuous map,
-    │                                        + panel_<date>.png + <date>_mean_continuous.png
-    └── artifacts/latest/                    model.joblib, run_info.json, features.json
+├── outputs/                       every file is generated
+│   ├── ablation_{results,summary}.csv       15 rows: 5 arms x 3 folds
+│   ├── test_metrics_all.csv                 one row per scored arm
+│   ├── test_metrics_<arm>.csv, predictions_test_<arm>.csv
+│   ├── oof_predictions_<arm>.csv            ~100 MB per arm
+│   ├── dataset_report.md                    Deliverable 1
+│   ├── figures/                             9 figures + arm_comparison(.png/_bars.png)
+│   ├── geocp_shared/                        geocp.json, candidates, test intervals
+│   ├── surfaces/<date>/                     per-hour CSV + GeoTIFF + AQI map + continuous map,
+│   │                                        + panel_<date>.png + <date>_mean_continuous.png
+│   └── artifacts/latest/                    model.joblib, run_info.json, features.json
+│
+└── .tile_cache/                   optional: 9 OSM tiles, 254 KB, makes maps render offline
 ```
 
 Every writer creates its own directory (`os.makedirs(..., exist_ok=True)`), so `outputs/` need not exist at
 all — a fresh clone creates it on the first stage.
+
+## The dataset is on Kaggle, and it can be shared
+
+The inputs are published as a **Kaggle dataset**, `xgboost-data`. It is private by default; **anyone you
+give the link to can use it**, and you can also add collaborators in *Settings → Collaborators*. Nothing in
+the pipeline is tied to the owner, so a shared copy works unchanged.
+
+Upload it as **one folder, `dataexample/`** (zip it, or drag the folder). Rename nothing except the tile
+cache, which must be `.tile_cache`.
+
+| Contents | Size | Needed? |
+|---|---|---|
+| `OpenAQ/` | 39 MB | yes |
+| `QC Data Converted/` | 112 MB | yes |
+| `Morphology/master_raster_v2.tif` | 87 MB | yes |
+| `Combined Dataset/full_with_preinstall/locations.csv` | 6 KB | yes |
+| `.tile_cache/` (9 tiles) | 254 KB | optional — the map basemap |
+| `Master_DL_Ready_full.csv` | 171 MB | optional — skips a ~4 min build |
+| `morphology_grid_full.csv` + `.json` | 0.8 MB | optional — skips the grid build |
+| `patch_stats.csv`, `sensor_locations.csv`, `fold_partitions_shared.json` | 55 KB | optional |
+| `imputed_cells.json`, `imputed_texture_cells.json`, `ingest_report.json` | 30 KB | optional |
+
+The other five `Combined Dataset/*` variants (~2 GB extracted) and `QC Data/` are **not read by this
+pipeline** — delete them before uploading and the archive drops from ~217 MB to ~90 MB.
+
+**The code is not in the dataset.** It comes from this repository, which is why the notebook has a
+`git clone` branch. In Kaggle:
+
+1. **Add Input** → your `xgboost-data` dataset (or a copy someone shared with you).
+2. Import `xgboost/xgboost_full.ipynb` from this repository.
+3. **Accelerator: None (CPU)**, **Internet: On** — the clone needs it.
+4. **Save & Run All (Commit)**.
+
+Cell 0 then either copies the code out of an attached code dataset, or clones this repository and
+`cd`s into `xgboost/`, links the bundle into `data/`, and runs the build stages only for the files the
+bundle does not already carry. It prints `folds`, `master` and `grid` before anything else, so a wrong
+attach fails immediately instead of two hours in.
+
+Full training on Kaggle takes **~2.5–3 hours** for the five-arm search, plus ~15 minutes for the surfaces.
+The local run skips training entirely when `outputs/ablation_results.csv` already exists.
 
 ## Prerequisites: what is NOT in the repository
 
@@ -119,9 +183,9 @@ python run_pipeline.py --stage patch   # -> patch_stats.csv
 
 Two dependencies worth knowing:
 
-- `build_morphology_grid.py` reads the OpenAQ station table from `../CNN-LSTM/pilot testing/...`, which is
-  not in this repository. Either keep that folder beside the repo, or copy the prebuilt
-  `sensor_locations.csv` from the data bundle and skip that step.
+- `build_morphology_grid.py` needs the OpenAQ station table. Pass it explicitly from the Kaggle bundle:
+  `--openaq-locations "<bundle>/Combined Dataset/full_with_preinstall/locations.csv"`. Without that flag
+  it falls back to `../CNN-LSTM/pilot testing/...`, which is not in this repository.
 - `fold_partitions_shared.json` is deterministic despite being excluded: the 16 test and 13 calibration
   station ids are literals in `training/shared_split.py`, adopted from the CNN-LSTM run. `--stage split`
   reproduces the exact partition.
