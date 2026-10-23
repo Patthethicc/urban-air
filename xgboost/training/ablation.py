@@ -110,6 +110,11 @@ K_INNER = 3
 N_TRIALS = 20
 N_INITIAL_POINTS = 8
 
+# The untuned control: XGBoost's own defaults, used to measure what the Bayesian search bought.
+# Deliberately conservative and unremarkable -- the point is that no search touched them.
+DEFAULT_PARAMS = {'colsample_bytree': 0.8, 'gamma': 0.0, 'learning_rate': 0.1, 'max_depth': 6,
+                  'min_child_weight': 1.0, 'reg_alpha': 0.0, 'reg_lambda': 1.0, 'subsample': 1.0}
+
 
 def validate_arm_features():
     """Every arm must be a subset of prep.features (plus the lag columns, which are added later),
@@ -156,7 +161,8 @@ def build_design_matrix(df_clean, arm, spatial_lag=None):
 
 
 def tune_and_evaluate(X_arm, y, df_train, outer_fold, inner_map, n_trials, random_state=42,
-                      verbose=True, n_initial_points=N_INITIAL_POINTS, arm=None, k_lag=None):
+                      verbose=True, n_initial_points=N_INITIAL_POINTS, arm=None, k_lag=None,
+                      row_stride=1, params_fixed=None):
     """Nested CV for ONE outer fold: Bayesian search on inner folds, then score the held-out fold.
 
     Returns (metrics dict, out-of-fold frame for this fold).
@@ -190,12 +196,24 @@ def tune_and_evaluate(X_arm, y, df_train, outer_fold, inner_map, n_trials, rando
 
     call_records = []
 
+    # Tuning on every row is what makes a 20-trial search cost 2.5 h. Striding the TRAINING rows of
+    # each inner fit keeps every validation row (so early stopping still sees the real signal) while
+    # making each trial proportionally cheaper -- the search can then afford 60 trials instead of 20.
+    _stride = max(1, int(row_stride))
+
     @use_named_args(SEARCH_SPACE)
     def objective(**params):
+        # skopt hands integer dimensions back as 6.0, which XGBoost rejects for max_depth
+        params = {k: (int(round(v)) if k == 'max_depth' else v) for k, v in params.items()}
         inner_rmses, inner_r2s, best_iters = [], [], []
         for inner_f in sorted(set(inner_labels)):
             itr = inner_labels != inner_f
             ite = inner_labels == inner_f
+            if _stride > 1:
+                idx = np.flatnonzero(itr)
+                keep = np.zeros_like(itr)
+                keep[idx[::_stride]] = True
+                itr = keep
             model = xgb.XGBRegressor(n_estimators=500, early_stopping_rounds=20,
                                      random_state=random_state, tree_method='hist', n_jobs=-1,
                                      **params)
@@ -238,24 +256,36 @@ def tune_and_evaluate(X_arm, y, df_train, outer_fold, inner_map, n_trials, rando
               f"best {best:.5f} (r2 {best_r2:.4f}){mark}  {elapsed:5.0f}s  eta {eta:4.0f}s",
               flush=True)
 
-    if verbose:
-        print(f"    fold {outer_fold}: tuning ({n_trials} trials x {n_inner} inner folds, "
-              f"{len(X_tr):,} train rows) ...", flush=True)
-
-    # skopt insists on n_calls > n_initial_points. Keep the thesis setting (8) but shrink the random
-    # phase for deliberately short searches, so `--n-trials 3` gives a quick read instead of a crash.
-    n_initial_points = max(2, min(n_initial_points, n_trials - 1))
-    gp_minimize(objective, SEARCH_SPACE, n_calls=n_trials, n_initial_points=n_initial_points,
-                acq_func='EI', random_state=random_state, verbose=False,
-                callback=_progress if verbose else None)
+    if params_fixed is not None:
+        # Untuned control: same fold, same striding, no search -- one fixed parameter set.
+        _keys = [d.name for d in SEARCH_SPACE]
+        _missing = [k for k in _keys if k not in params_fixed]
+        assert not _missing, f'params_fixed is missing {_missing}'
+        if verbose:
+            print(f"    fold {outer_fold}: FIXED parameters, no search "
+                  f"({len(X_tr):,} train rows, stride {_stride}) ...", flush=True)
+        # use_named_args exposes the decorated callable positionally, in SEARCH_SPACE order
+        objective([params_fixed[d.name] for d in SEARCH_SPACE])
+    else:
+        if verbose:
+            print(f"    fold {outer_fold}: tuning ({n_trials} trials x {n_inner} inner folds, "
+                  f"{len(X_tr):,} train rows, stride {_stride}) ...", flush=True)
+        # skopt insists on n_calls > n_initial_points. Keep the thesis setting (8) but shrink the
+        # random phase for short searches, so `--n-trials 3` gives a quick read instead of a crash.
+        n_initial_points = max(2, min(n_initial_points, n_trials - 1))
+        gp_minimize(objective, SEARCH_SPACE, n_calls=n_trials, n_initial_points=n_initial_points,
+                    acq_func='EI', random_state=random_state, verbose=False,
+                    callback=_progress if verbose else None)
 
     best_call = min(call_records, key=lambda r: r['avg_rmse'])
-    best_params = {k: (int(v) if isinstance(v, np.integer) else float(v))
+    # max_depth must stay an int: XGBoost rejects '6.0'. Everything else may be float.
+    best_params = {k: (int(round(v)) if k == 'max_depth' else float(v))
                    for k, v in best_call['params'].items()}
     best_n_estimators = max(10, int(round(best_call['avg_best_iteration'])))
 
     if verbose:
-        print(f"    fold {outer_fold}: search done, best inner_rmse {best_call['avg_rmse']:.5f} "
+        print(f"    fold {outer_fold}: {'FIXED' if params_fixed else 'search done'}, "
+              f"inner_rmse {best_call['avg_rmse']:.5f} "
               f"inner_r2 {best_call.get('avg_r2', float('nan')):.4f} "
               f"-> n_estimators={best_n_estimators}; fitting final model on {len(X_tr):,} rows ...",
               flush=True)
@@ -293,7 +323,8 @@ def tune_and_evaluate(X_arm, y, df_train, outer_fold, inner_map, n_trials, rando
     return metrics, oof
 
 
-def run(arms=('A', 'B', 'C'), n_trials=N_TRIALS, smoke=False, out_dir=OUT_DIR, seed=42):
+def run(arms=('A', 'B', 'C'), n_trials=N_TRIALS, smoke=False, out_dir=OUT_DIR, seed=42,
+        row_stride=1, untuned=False):
     validate_arm_features()
     df = prep.df_clean.copy()
     y_all = np.log1p(df['Value'].values)
@@ -330,7 +361,8 @@ def run(arms=('A', 'B', 'C'), n_trials=N_TRIALS, smoke=False, out_dir=OUT_DIR, s
                 X_arm, y, df_train, fold, inner_maps[int(fold)],
                 n_trials=(3 if smoke else n_trials), random_state=seed,
                 n_initial_points=(2 if smoke else N_INITIAL_POINTS),
-                arm=arm, k_lag=k_lag)
+                arm=arm, k_lag=k_lag, row_stride=row_stride,
+                params_fixed=(DEFAULT_PARAMS if untuned else None))
             metrics['arm'] = arm
             metrics['n_features'] = len(ARM_FEATURES[arm])
             all_results.append(metrics)
