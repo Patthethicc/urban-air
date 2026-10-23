@@ -71,7 +71,13 @@ def tuned_config(arm):
     return DEFAULT_PARAMS, DEFAULT_N_EST, 'defaults (no ablation rows for this arm)'
 
 
-def run(arm='C', out_dir=None):
+def run(arm='C', out_dir=None, seeds=None):
+    """Score the arm on the reserved test stations.
+
+    seeds=[42, 43, 44] fits one model per seed, reports the ENSEMBLE with the per-seed
+    spread, and writes the ensemble predictions. A single seed cannot say whether a
+    0.66 is stable; three can.
+    """
     out_dir = out_dir or data.OUT_DIR
     doc = json.load(open(SHARED, encoding='utf-8'))
     parts = doc['partitions']
@@ -110,14 +116,29 @@ def run(arm='C', out_dir=None):
     ytr = df_tr['Value'].to_numpy(float)
     yte = df_te['Value'].to_numpy(float)
 
-    model = xgb.XGBRegressor(n_estimators=n_est, random_state=42, tree_method='hist',
-                             n_jobs=-1, **params)
-    model.fit(Xtr, np.log1p(ytr))
-    pred = np.expm1(model.predict(Xte))
+    seeds = [int(x) for x in (seeds or [42])]
+    preds, seed_r2 = [], []
+    for sd in seeds:
+        model = xgb.XGBRegressor(n_estimators=n_est, random_state=sd, tree_method='hist',
+                                 n_jobs=-1, **params)
+        model.fit(Xtr, np.log1p(ytr))
+        p = np.expm1(model.predict(Xte))
+        preds.append(p)
+        ss_res = float(((yte - p) ** 2).sum())
+        ss_tot = float(((yte - yte.mean()) ** 2).sum())
+        seed_r2.append(1.0 - ss_res / ss_tot)
+    pred = np.mean(preds, axis=0)          # ensemble over seeds; identical to one fit when len==1
+    if len(seeds) > 1:
+        print('  seeds %s -> per-seed R2 %s (sd %.4f); reporting the ensemble'
+              % (seeds, ' '.join('%.4f' % v for v in seed_r2), float(np.std(seed_r2, ddof=1))))
 
     m = metrics(yte, pred)
     m['arm'] = arm
     m['stations'] = int(df_te['Location'].nunique())
+    if len(seeds) > 1:
+        m['n_seeds'] = len(seeds)
+        m['r2_seed_mean'] = float(np.mean(seed_r2))
+        m['r2_seed_sd'] = float(np.std(seed_r2, ddof=1))
 
     print('\n=== TEST partition (stations the model never saw) ===')
     print('  %-24s %10s' % ('metric', 'value'))
