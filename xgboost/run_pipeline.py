@@ -52,9 +52,15 @@ def stage_patch():
     patch_stats.main()
 
 
-def stage_test(arm='C'):
-    """Score the production model on the reserved test stations."""
+def stage_test(arm='C', seeds=None):
+    """Score the production model on the reserved test stations.
+
+    seeds=[42, 43, 44] fits one model per seed, reports the ensemble with the per-seed spread, and
+    writes the ensemble's predictions -- the variance statement a single seed cannot make.
+    """
     from training import final_test
+    if seeds:
+        return final_test.run(arm, seeds=seeds)
     return final_test.run(arm)
 
 
@@ -68,9 +74,11 @@ def stage_figures(arm=None):
     return figures.main(arm)
 
 
-def stage_ablation(n_trials=20, arms=('A', 'B', 'C'), smoke=False):
+def stage_ablation(n_trials=20, arms=('A', 'B', 'C'), smoke=False, row_stride=1,
+                   untuned=False, out_dir=None):
     from training.ablation import run
-    run(arms=list(arms), n_trials=n_trials, out_dir=data.OUT_DIR, smoke=smoke)
+    run(arms=list(arms), n_trials=n_trials, out_dir=out_dir or data.OUT_DIR, smoke=smoke,
+        row_stride=row_stride, untuned=untuned)
 
 
 def stage_geocp(alpha=0.10, h_mode='thesis-grid', max_cal=None, max_eval=None, profile='default'):
@@ -242,6 +250,15 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--stage', required=True, choices=STAGES)
     ap.add_argument('--n-trials', type=int, default=20)
+    ap.add_argument('--row-stride', type=int, default=1,
+                    help='ablation: tune on every Nth training row (1 = all rows). The validation '
+                         'rows are never strided, so early stopping is unaffected.')
+    ap.add_argument('--untuned', action='store_true',
+                    help='ablation: skip the search and fit with DEFAULT_PARAMS (the untuned control)')
+    ap.add_argument('--ablation-out-dir', default=None,
+                    help='ablation: write results here instead of outputs/ (keeps the main run intact)')
+    ap.add_argument('--test-seeds', nargs='+', type=int, default=None,
+                    help='test stage: fit this many seeds and report the ensemble with per-seed sd')
     ap.add_argument('--arms', nargs='+', default=None,
                     choices=['A', 'B', 'C', 'C+', 'TEXTURE'],
                     help='ablation arms to run (default: A B C)')
@@ -289,9 +306,11 @@ def main():
     elif args.stage == 'patch':
         stage_patch()
     elif args.stage == 'ablation':
-        stage_ablation(args.n_trials, arms=args.arms or ('A', 'B', 'C'), smoke=args.smoke)
+        stage_ablation(args.n_trials, arms=args.arms or ('A', 'B', 'C'), smoke=args.smoke,
+                       row_stride=args.row_stride, untuned=args.untuned,
+                       out_dir=args.ablation_out_dir)
     elif args.stage == 'test':
-        stage_test(args.test_arm)
+        stage_test(args.test_arm, seeds=args.test_seeds)
     elif args.stage == 'figures':
         stage_figures(args.figures_arm)
     elif args.stage == 'geocp':

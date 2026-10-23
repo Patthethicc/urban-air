@@ -238,7 +238,7 @@ $env:XGB_FOLDS = 'shared'                        # bash: export XGB_FOLDS=shared
 
 python run_pipeline.py --stage split             # 54 / 13 / 16 station split   (~1 min)
 python run_pipeline.py --stage patch             # 10 m patch statistics       (~1 min)
-python ablation.py --arms A B C C+ TEXTURE --n-trials 20
+python run_pipeline.py --stage ablation --arms A B C C+ TEXTURE --n-trials 60 --row-stride 4
 ```
 
 **~1.5–2.5 hours.** Measured on the shared split: ~14 s per trial, ~6 min per fold for arms A and C
@@ -361,7 +361,8 @@ On Windows PowerShell use `$env:XGB_DATASET='pilot'` first (they are separate pr
 | `--stage partitions` | ~3 min | includes the leakage test |
 | `--stage ablation --smoke` | ~6 min | 1 trial, 1 outer fold, subsampled rows |
 | `--stage ablation --n-trials 8` | ~1 h | cheapest valid search |
-| 5 arms × 20 trials (Step 1) | **~1.5–2.5 h** | measured on the shared split: ~14 s/trial, ~6 min/fold (30 fit cells, 412 k rows); plus a fold-aware lag per C+ fold |
+| 5 arms × 20 trials, full rows | ~2.5 h | the original setting; ~14 s/trial, ~6 min/fold |
+| 5 arms × 60 trials, `--row-stride 4` | **~1.9 h** | the current default: 3× the trials at ¼ the rows per trial, and the search actually converges |
 | `--stage ablation` alone (3 arms) | ~2.5–4 h | measured: 1 arm × 8 trials × 3 folds took >25 min (~24 fits ≈ 50 s/fit) |
 | `--stage geocp --max-cal 6000 --max-eval 20000` | ~5.5 min | caps required at this size |
 | `--stage save` | ~1 min | one fit on 1.26 M rows |
@@ -521,7 +522,7 @@ Its pieces are individually runnable:
 
 ```powershell
 $env:XGB_FOLDS='shared'
-python ablation.py --arms A B C C+ TEXTURE --n-trials 20
+python run_pipeline.py --stage ablation --arms A B C C+ TEXTURE --n-trials 60 --row-stride 4
 ```
 
 C+ computes its lag **inside each outer fold** from that fold's fit cells only (k=5 nearest stations,
