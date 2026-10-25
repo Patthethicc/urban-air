@@ -18,6 +18,8 @@ import os
 import subprocess
 import sys
 
+import numpy as np
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -25,7 +27,7 @@ if ROOT not in sys.path:
 import data  # noqa: E402
 
 STAGES = ('report', 'partitions', 'split', 'patch', 'ablation', 'test', 'geocp',
-          'save', 'infer', 'figures', 'checks', 'all')
+          'save', 'infer', 'grid10', 'infer10', 'figures', 'checks', 'all')
 
 
 def stage_report():
@@ -230,6 +232,87 @@ def stage_infer(date=None, timestamps=None, out_dir=None, arm=None):
     return written
 
 
+def stage_grid10(window_px=None):
+    """Build the 10 m patch-statistic stack (six feature rasters) from the morphology GeoTIFF."""
+    from preprocessing import patch_stack
+    st = patch_stack.build(window_px=window_px or patch_stack.WINDOW_PX)
+    return patch_stack.save(st)
+
+
+def stage_infer10(date=None, window_px=None, out_dir=None, arm=None, limit=None):
+    """Predict the full 10 m grid for the four snapshot hours of each date.
+
+    `limit` is a developer aid: it restricts the run to the first N rows so the whole path can be
+    exercised in minutes before committing to 10.6 M pixels.
+    """
+    import pandas as pd
+    from inference import grid10m
+    from maps import raster_surfaces
+    from preprocessing import patch_stack
+
+    from training.ablation import DEFAULT_PARAMS
+    import json as _json
+
+    dates = [date] if date else ['2025-07-23', '2025-08-30']
+    st = patch_stack.load()
+    # Refit on patch features: the 500 m model was fitted on cell aggregates, and using it here
+    # produced a mean of 77 ug/m3 against 19 observed -- a feature-definition mismatch, not a bug.
+    results_path = data.ABLATION_RESULTS
+    arm_used = arm or best_arm()
+    if not os.path.exists(results_path):
+        raise SystemExit('%s is missing -- run `--stage ablation` first' % results_path)
+    import pandas as pd
+    res = pd.read_csv(results_path)
+    rows_ = res[res['arm'] == arm_used]
+    if rows_.empty:
+        raise SystemExit('no ablation rows for arm %s' % arm_used)
+    best = rows_.set_index('outer_fold')
+    fold = int(best['r2'].idxmax())
+    params = _json.loads(best.loc[fold, 'best_params'])
+    n_est = int(best.loc[fold, 'n_estimators'])
+    from training.ablation import ARM_FEATURES
+    feature_names = list(ARM_FEATURES[arm_used])
+    from preprocessing import prep
+    model = grid10m.fit_patch_model(prep.df_clean, st, params, n_est, feature_names)
+    rows = (0, int(limit)) if limit else None
+    written, frames = grid10m.run(model, feature_names, dates, out_dir=out_dir, window_px=window_px,
+                                 row_slice=rows)
+    st = patch_stack.load()
+    meta = st['meta']
+    t = meta['transform']
+    full = (t[2], t[2] + t[0] * meta['shape'][1],
+            t[5] + t[4] * meta['shape'][0], t[5])
+    pngs = []
+    for d in dates:
+        day = pd.Timestamp(d).strftime('%Y%m%d')
+        sub = {ts: f for ts, f in frames.items() if pd.Timestamp(ts).strftime('%Y%m%d') == day}
+        if not sub:
+            continue
+        # crop to the bounding box of the usable pixels: otherwise the figure keeps the full raster
+        # extent and shows an empty band wherever the morphology raster has no coverage.
+        anyu = np.zeros(sub[next(iter(sub))]['usable'].shape, dtype=bool)
+        for f in sub.values():
+            anyu |= f['usable']
+        rr = np.flatnonzero(anyu.any(axis=1))
+        cc = np.flatnonzero(anyu.any(axis=0))
+        if len(rr) and len(cc):
+            r0_, r1_ = int(rr[0]), int(rr[-1]) + 1
+            c0_, c1_ = int(cc[0]), int(cc[-1]) + 1
+            sub = {k: {kk: vv[r0_:r1_, c0_:c1_] for kk, vv in f.items()} for k, f in sub.items()}
+        else:
+            r0_, r1_, c0_, c1_ = 0, anyu.shape[0], 0, anyu.shape[1]
+        vals = np.concatenate([f['prediction'][np.isfinite(f['prediction'])].ravel()[:200000]
+                               for f in sub.values()])
+        vmin, vmax = float(np.nanpercentile(vals, 2)), float(np.nanpercentile(vals, 98))
+        t = meta['transform']
+        full = (t[2] + c0_ * t[0], t[2] + c1_ * t[0], t[5] + r1_ * t[4], t[5] + r0_ * t[4])
+        out = out_dir or data.out('surfaces10m')
+        pngs.append(raster_surfaces.panel(sub, os.path.join(out, 'panel_10m_%s.png' % day),
+                                          full, vmin, vmax, day))
+        print('    panel ->', pngs[-1])
+    return written + pngs
+
+
 def stage_checks():
     import glob
     shims = sorted(glob.glob(os.path.join(ROOT, 'checks', '*.py')))
@@ -250,6 +333,10 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--stage', required=True, choices=STAGES)
     ap.add_argument('--n-trials', type=int, default=20)
+    ap.add_argument('--window-px', type=int, default=None,
+                    help='grid10/infer10: patch window in 10 m pixels (32 = 320 m, the CNN-LSTM patch)')
+    ap.add_argument('--limit-rows', type=int, default=None,
+                    help='infer10: only the first N raster rows (developer check on a small window)')
     ap.add_argument('--row-stride', type=int, default=1,
                     help='ablation: tune on every Nth training row (1 = all rows). The validation '
                          'rows are never strided, so early stopping is unaffected.')
@@ -311,6 +398,10 @@ def main():
                        out_dir=args.ablation_out_dir)
     elif args.stage == 'test':
         stage_test(args.test_arm, seeds=args.test_seeds)
+    elif args.stage == 'grid10':
+        stage_grid10(args.window_px)
+    elif args.stage == 'infer10':
+        stage_infer10(args.date, args.window_px, args.out_dir, args.save_arm, args.limit_rows)
     elif args.stage == 'figures':
         stage_figures(args.figures_arm)
     elif args.stage == 'geocp':
