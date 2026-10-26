@@ -276,11 +276,15 @@ def run(model, feature_names, dates, out_dir=None, window_px=None, chunk_rows=CH
                       % (f'{no_morph:,}', 100 * no_morph / usable.size,
                          f'{no_hist:,}', 100 * no_hist / usable.size))
         day = pd.Timestamp(d).strftime('%Y%m%d')
+        _day = [f for t, f in frames.items() if pd.Timestamp(t).date().isoformat() == str(d)]
+        _n = [int(f['usable'].sum()) for f in _day]
         summary = {
-            'date': str(d), 'hours': [str(pd.Timestamp(t)) for t in frames if pd.Timestamp(t).date().isoformat() == str(d)],
+            'date': str(d),
+            'hours': [str(pd.Timestamp(t)) for t in frames if pd.Timestamp(t).date().isoformat() == str(d)],
             'n_pixels': int((r1 - r0) * (c1 - c0)),
-            'n_usable': int(sum(int(f['usable'].sum()) for t, f in frames.items()
-                                if pd.Timestamp(t).date().isoformat() == str(d))),
+            'n_usable_min': int(min(_n)) if _n else 0,
+            'n_usable_max': int(max(_n)) if _n else 0,
+            'usable_fraction': round(float(min(_n)) / max(1, (r1 - r0) * (c1 - c0)), 4) if _n else 0.0,
             'window_px': meta['window_px'],
             'interval_source': (src_note or 'none') if 'src_note' in dir() else 'none',
             'note': 'interval bounds resampled bilinearly from the 500 m GeoCP field, not computed per pixel',
