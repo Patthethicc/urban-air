@@ -106,8 +106,10 @@ def build(raster_path=None, window_px=WINDOW_PX, verbose=True):
     water_px = (np.nan_to_num(bh) <= 0) & (np.nan_to_num(bands[3]) < 0.0)
     valid = valid & ~water_px
 
+    _st = os.stat(raster_path)
     meta = {'transform': tuple(transform)[:6], 'crs': str(crs), 'shape': (h, w),
-            'window_px': int(window_px)}
+            'window_px': int(window_px), 'raster_name': os.path.basename(raster_path),
+            'raster_size': int(_st.st_size), 'raster_mtime': int(_st.st_mtime)}
     if verbose:
         print('  patch stack: %d x %d px | window %d px (%.0f m) | %.0f MB in memory'
               % (w, h, window_px, window_px * abs(transform.a),
@@ -135,6 +137,13 @@ def load(path=None):
     if not os.path.exists(path):
         raise FileNotFoundError('%s is missing -- run `python run_pipeline.py --stage grid10`' % path)
     z = np.load(path, allow_pickle=False)
+    # The cache is only valid for the raster it was built from: the bundle moved v2 -> v3, and
+    # reusing a stack built on the old raster would quietly mix two morphology versions.
+    try:
+        if int(z['meta_raster_size']) != os.path.getsize(data.RASTER_TIF):
+            raise FileNotFoundError('cached stack was built from a different raster (size changed)')
+    except KeyError:
+        raise FileNotFoundError('cached stack has no raster identity -- rebuild it')
     arrays = {k: z[k] for k in FEATURE_COLUMNS if k in z}
     meta = {'transform': tuple(float(x) for x in z['meta_transform']),
             'crs': str(z['meta_crs']), 'shape': tuple(int(x) for x in z['meta_shape']),
