@@ -167,24 +167,99 @@ def _label_partitions(labelled, target_sizes, names=PARTITION_NAMES):
     return mapping
 
 
+def _balanced_partitions(centroids, n_train, n_calibration, n_test, n_restarts=60,
+                         random_state=42):
+    """k > 3 geographic clusters, then greedily grouped into the requested partition SIZES.
+
+    Why this exists: `search_partitions` with k=3 produces whatever three geographic clusters the
+    network actually has (on the 83-cell network: 39 / 10 / 34), and `_label_partitions` can only NAME
+    them -- it cannot make the training set bigger. Asking for 59/12/12 therefore yielded
+    train=39 / calibration=10 / test=34.
+
+    Clustering finer and then GROUPING whole clusters keeps every partition geographically contiguous
+    (no partition is scattered across the city) while allowing the sizes to be honoured. Candidate
+    groupings are scored by the minimum pairwise distance between partition centroids and the best is
+    kept, so separation is still preferred.
+    """
+    from sklearn.cluster import KMeans
+
+    xy = centroids[['cx', 'cy']].to_numpy(dtype=float)
+    n = len(xy)
+    targets = [('train', n_train), ('calibration', n_calibration), ('test', n_test)]
+    # enough clusters that the largest single one cannot dominate the train set
+    k = int(max(3, min(n - 1, round(n / 7))))
+
+    best, best_score = None, -np.inf
+    for seed in range(n_restarts):
+        labels = KMeans(n_clusters=k, random_state=random_state + seed, n_init=10).fit_predict(xy)
+        sizes = pd.Series(labels).value_counts()
+        order = list(sizes.index)                      # largest cluster first
+        groups, i = {name: [] for name, _ in targets}, 0
+        for name, want in targets:
+            taken = 0
+            while i < len(order) and taken < want:
+                c = order[i]
+                groups[name].append(int(c))
+                taken += int(sizes[c])
+                i += 1
+        if i < len(order):                             # leftover clusters -> test (largest remainder)
+            groups['test'] += [int(c) for c in order[i:]]
+        if any(not groups[name] for name, _ in targets):
+            continue
+        # score: minimum separation between partition centroids, and how close sizes came out
+        cents = {name: xy[np.isin(labels, groups[name])].mean(axis=0) for name, _ in targets}
+        seps = [float(np.hypot(*(cents[a] - cents[b])))
+                for i1, a in enumerate(cents) for b in list(cents)[i1 + 1:]]
+        size_err = sum(abs(int(np.isin(labels, groups[name]).sum()) - want)
+                       for name, want in targets)
+        score = min(seps) - 50.0 * size_err
+        if score > best_score:
+            best, best_score = (groups, cents, labels, k, seed), score
+
+    if best is None:
+        raise ValueError('could not build a balanced partition from the cell centroids')
+    groups, cents, labels, k_used, seed = best
+    # keep cx/cy: get_partitions recomputes per-partition centroids from these columns
+    out = centroids[['Grid_ID', 'cx', 'cy']].copy()
+    out['part'] = labels
+    mapping = {c: name for name, cs in groups.items() for c in cs}
+    out['partition'] = out['part'].map(mapping)
+    sizes = {name: int((out['partition'] == name).sum()) for name, _ in targets}
+    info = {'method': 'balanced-cluster-grouping', 'n_clusters': int(k_used), 'seed': int(seed),
+            'requested_sizes': {n_: int(w) for n_, w in targets}, 'partition_sizes': sizes,
+            'min_distance_between_partitions_m':
+                round(min(float(np.hypot(*(cents[a] - cents[b])))
+                          for i1, a in enumerate(cents) for b in list(cents)[i1 + 1:]), 1),
+            'centroids': {n_: {'cx': float(c[0]), 'cy': float(c[1])} for n_, c in cents.items()},
+            'random_state': random_state}
+    return out, info
+
+
 def get_partitions(mapping_csv_path=None, n_train=11, n_calibration=3, n_test=3,
-                   k=3, n_restarts=200, random_state=42):
+                   k=3, n_restarts=200, random_state=42, balanced=False):
     """Assign every grid cell to 'train', 'calibration' or 'test' using spatial clustering.
 
     Calibration cells are what GeoCP's conformity scores are built from, so they must be cells the
     model never trained on; test cells are the final untouched read. Both are chosen together with
     the train cells so the three partitions are geographically separated.
 
+    `balanced=True` uses finer clustering plus cluster grouping so the requested SIZES are actually
+    met, which the pilot's k=3 approach cannot do on a larger network (see `_balanced_partitions`).
+
     Returns {'partitions': {name: [Grid_ID, ...]}, 'info': {...}} with info recording the winning
     search seed, the separation score, per-partition sizes and each partition's centroid, so the
     split can be reported in the paper and reproduced exactly.
     """
     centroids = get_grid_centroids(mapping_csv_path)
-    labelled, _, info = search_partitions(centroids, k=k, n_restarts=n_restarts,
-                                          random_state=random_state)
-    mapping = _label_partitions(labelled, {'train': n_train, 'calibration': n_calibration,
-                                           'test': n_test})
-    labelled['partition'] = labelled['part'].map(mapping)
+    if balanced:
+        labelled, info = _balanced_partitions(centroids, n_train, n_calibration, n_test,
+                                              random_state=random_state)
+    else:
+        labelled, _, info = search_partitions(centroids, k=k, n_restarts=n_restarts,
+                                              random_state=random_state)
+        mapping = _label_partitions(labelled, {'train': n_train, 'calibration': n_calibration,
+                                               'test': n_test})
+        labelled['partition'] = labelled['part'].map(mapping)
 
     partitions = {name: sorted(int(g) for g in labelled.loc[labelled['partition'] == name,
                                                              'Grid_ID'])
@@ -240,15 +315,22 @@ def _jsonable(obj):
 
 
 def build_fold_document(mapping_csv_path=None, k_outer=3, k_inner=3,
-                        n_calibration=3, n_test=3, random_state=42, n_restarts=200):
+                        n_calibration=3, n_test=3, n_train=None, balanced=False,
+                        random_state=42, n_restarts=200):
     """One JSON-able document holding the partitions and every fold map derived from them.
 
     Outer folds are built on the training cells only. The test and calibration cells are excluded
     from both CV levels, and the inner folds for each outer fold are built by excluding that
     fold's held-out cells as well, so no inner fold ever sees the outer fold's test cells.
+
+    `n_train` (`None` -> get_partitions' pilot default of 11) should be stated explicitly on a larger
+    network: get_partitions labels clusters by proximity to the REQUESTED sizes, so leaving n_train at
+    11 while asking for more calibration/test on 83 cells hands the largest cluster to calibration
+    (observed: train=10 vs calibration=34, test=39) instead of growing the training set.
     """
     part = get_partitions(mapping_csv_path, n_calibration=n_calibration, n_test=n_test,
-                          k=3, n_restarts=n_restarts, random_state=random_state)
+                          n_train=n_train, k=3, n_restarts=n_restarts, random_state=random_state,
+                          balanced=balanced)
     train_cells = part['partitions']['train']
     held_out = part['partitions']['calibration'] + part['partitions']['test']
 

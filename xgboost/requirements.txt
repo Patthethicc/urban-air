@@ -1,0 +1,23 @@
+# Pinned to the versions the thesis results were produced with (recorded in
+# outputs/artifacts/latest/run_info.json on 2026-10-19, Python 3.13.3).
+#
+# Pinning matters here: the pipeline uses pandas idioms whose behaviour changed across the 2.x -> 3.x
+# boundary (copy-on-write, groupby apply defaults), and scikit-optimize is not part of Kaggle's image,
+# so an unpinned environment silently produces different numbers or fails outright.
+#
+# On Kaggle, most of these are already installed; install the gaps with:
+#     !pip install -q scikit-optimize shap
+# and leave the rest alone if Kaggle's versions already satisfy the pipeline.
+xgboost==3.3.0
+scikit-optimize==0.10.2
+scikit-learn==1.8.0
+pandas==3.0.3
+numpy==2.2.6
+scipy>=1.14
+matplotlib==3.10.3
+shap==0.52.0
+rasterio==1.5.2
+pyproj==3.7.2
+affine==3.0.1
+geopandas==1.1.4
+joblib>=1.4

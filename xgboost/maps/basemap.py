@@ -121,7 +121,63 @@ def _draw_web(ax, crs):
 TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
 # Standard OSM tiles are more saturated than the pale Positron style the CNN-LSTM figures use, so
 # blend them toward white; 1.0 = untouched, 0.0 = plain white.
-TILE_LIGHTEN = 0.45
+TILE_LIGHTEN = 0.72
+
+
+# Tile fetching is best-effort and must never stall a run. Three guards, all added after a Kaggle run
+# spent over an hour here:
+#   * 5 s timeout, not 20. OSM throttles datacenter IPs, so every request otherwise sat out the timeout;
+#   * STICKY failure: one failed request disables tiles for the rest of the process. Without it, nine map
+#     renders x 9 tiles x 20 s repeated the same doomed request 81 times (~27 min for nothing);
+#   * the cache is checked FIRST, so a shipped .tile_cache renders instantly with no network at all.
+# A pre-seeded cache is the reliable way to get tiles on a machine that cannot reach the tile server.
+_TILE_STATE = {'failed': False, 'fetched': 0}
+TILE_TIMEOUT_S = 5
+
+
+# Accepted spellings of the cache folder, in order of preference. '.tile_cache' is what this module
+# writes; the others exist because a hand-built data bundle may name it differently, and losing the
+# basemap over a missing underscore is a silly failure.
+_CACHE_NAMES = ('.tile_cache', '.tilecache', 'tile_cache', 'tilecache')
+
+
+def _cache_dirs():
+    """Where to look for a cached tile, in order.
+
+    1. beside the code (the working directory) -- what a normal run writes;
+    2. inside `data/` -- so a DATA bundle can carry the tiles. On Kaggle the repository is cloned into a
+       fresh directory and the data is symlinked in, so a cache shipped with the data would otherwise
+       never be found and every map would lose its basemap.
+
+    Four spellings are accepted per location, because the folder may be created by hand.
+    """
+    roots = ['.']
+    try:
+        import data as _data
+        roots.append(_data.DATA_DIR)
+    except Exception:
+        pass
+
+    dirs = []
+    shipped = CONFIG['cache_dir']
+    if shipped not in dirs:
+        dirs.append(shipped)                     # honour an explicit override first
+    for root in roots:
+        for name in _CACHE_NAMES:
+            cand = os.path.join(root, name)
+            if cand not in dirs:
+                dirs.append(cand)
+    return dirs
+
+
+def _find_tile(z, x, y):
+    """(path, dir_to_write_into) for an existing tile, else (None, default_dir)."""
+    dirs = _cache_dirs()
+    for root in dirs:
+        p = os.path.join(root, str(z), str(x), '%d.png' % y)
+        if os.path.exists(p):
+            return p, root
+    return None, dirs[0]
 
 
 def _tile_png(z, x, y):
@@ -129,18 +185,26 @@ def _tile_png(z, x, y):
     import urllib.request
     import matplotlib.image as mpimg
 
-    cache = os.path.join(CONFIG['cache_dir'], str(z), str(x))
-    path = os.path.join(cache, '%d.png' % y)
-    if not os.path.exists(path):
+    path, root = _find_tile(z, x, y)
+    cache = os.path.join(root, str(z), str(x))
+
+    if path is None:
+        if os.environ.get('XGB_NO_TILES', '').strip() not in ('', '0'):
+            return None
+        if _TILE_STATE['failed']:
+            return None
         os.makedirs(cache, exist_ok=True)
         try:
             req = urllib.request.Request(TILE_URL.format(z=z, x=x, y=y),
                                          headers={'User-Agent': 'thesis-pm25-mapper/1.0'})
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=TILE_TIMEOUT_S) as resp:
                 data = resp.read()
-            with open(path, 'wb') as fh:
+            with open(os.path.join(cache, '%d.png' % y), 'wb') as fh:
                 fh.write(data)
+            path = os.path.join(cache, '%d.png' % y)
+            _TILE_STATE['fetched'] += 1
         except Exception:
+            _TILE_STATE['failed'] = True      # give up for the rest of the process
             return None
     try:
         img = mpimg.imread(path)

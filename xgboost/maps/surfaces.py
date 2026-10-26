@@ -305,7 +305,7 @@ def render_daily_mean(frames, out_dir, date, vmin=None, vmax=None, stem=None):
 
 
 
-SURFACE_ALPHA = 0.78      # lets the basemap read through the prediction surface
+SURFACE_ALPHA = 0.62      # lets the basemap read through the prediction surface
 _STATIONS = {}
 
 
@@ -457,9 +457,11 @@ def render_panel(frames, path, *, vmin=None, vmax=None, ncols=2, title=None):
     from matplotlib.cm import ScalarMappable
     from maps import basemap
 
-    items = list(frames.items())
+    items = [(ts, c[c['prediction_usable'].astype(bool)] if 'prediction_usable' in c.columns else c)
+             for ts, c in frames.items()]
+    items = [(ts, c) for ts, c in items if len(c)]
     if not items:
-        raise ValueError('render_panel got no frames')
+        raise ValueError('render_panel got no usable frames')
     if vmin is None or vmax is None:
         vmin, vmax = suggest_limits(frames)
     nrows = -(-len(items) // ncols)

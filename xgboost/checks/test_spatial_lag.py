@@ -27,6 +27,9 @@ doc = spatial_cv.load_fold_map(data.FOLD_JSON)
 parts = doc['partitions']
 cent = spatial_cv.get_grid_centroids()
 grid_ids = [int(g) for g in cent['Grid_ID']]
+# Probe cell for this dataset. Cell _probe_cell was a pilot literal; it is absent from the 3,696-cell grid,
+# so compute_spatial_lag produced no rows for it ("No objects to concatenate").
+_probe_cell = int(cent['Grid_ID'].iloc[0])
 coords = cent[['cx', 'cy']].values
 
 fails = []
@@ -54,30 +57,30 @@ def manual_lag(target, hours, neighbours, weights, obs):
 
 
 print('1. all-cells-allowed call (the case that used to collapse to 1.0)')
-lag_all = prep.compute_spatial_lag(df, allowed_grid_ids=grid_ids, target_grid_ids=[226], k=4)
+lag_all = prep.compute_spatial_lag(df, allowed_grid_ids=grid_ids, target_grid_ids=[_probe_cell], k=4)
 col = lag_all['pm25_spatial_lag'].dropna()
 check('output has more than one distinct value', col.nunique() > 100,
       f'{col.nunique()} distinct')
 check('output is not constant 1.0/log1p(1)', not np.allclose(col.unique(), 0.6931471805599453))
 check('output is not constant 1.0 raw',
       not np.allclose(prep.compute_spatial_lag(df, allowed_grid_ids=grid_ids,
-                                              target_grid_ids=[226], k=4, log_target=False)
+                                              target_grid_ids=[_probe_cell], k=4, log_target=False)
                       ['pm25_spatial_lag'].dropna().unique(), 1.0))
 
 print('\n2. row count equals the target cell\'s own (cell, hour) pairs')
-expected = df[df['Grid_ID'] == 226][['Grid_ID', 'DateTime']].drop_duplicates().shape[0]
+expected = df[df['Grid_ID'] == _probe_cell][['Grid_ID', 'DateTime']].drop_duplicates().shape[0]
 check('rows match distinct (Grid_ID, DateTime) of the target', len(lag_all) == expected,
       f'{len(lag_all)} vs {expected}')
 
 print('\n3. matches an independent hand-rolled weighted mean')
 obs = df.groupby(['Grid_ID', 'DateTime'])['Value'].mean().unstack('DateTime')
-pos = grid_ids.index(226)
+pos = grid_ids.index(_probe_cell)
 dist = np.sqrt(((coords - coords[pos]) ** 2).sum(axis=1))
-order = [j for j in np.argsort(dist) if grid_ids[j] != 226]
+order = [j for j in np.argsort(dist) if grid_ids[j] != _probe_cell]
 nbr_ids = [grid_ids[j] for j in order[:4]]
 nbr_w = 1.0 / dist[order[:4]]
 hours = list(lag_all['DateTime'])
-mine = manual_lag(226, hours, nbr_ids, nbr_w, obs)
+mine = manual_lag(_probe_cell, hours, nbr_ids, nbr_w, obs)
 theirs = lag_all.set_index('DateTime').loc[hours, 'pm25_spatial_lag'].values
 m = ~np.isnan(mine) & ~np.isnan(theirs)
 check('matches for every overlapping hour', np.allclose(np.log1p(mine[m]), theirs[m]),
@@ -88,8 +91,8 @@ check('NaN pattern matches (no neighbour reading -> NaN)',
 
 print('\n4. the target cell\'s own readings must not enter its own lag')
 corrupt = df.copy()
-corrupt.loc[corrupt['Grid_ID'] == 226, 'Value'] = 9999.0
-dirty = prep.compute_spatial_lag(corrupt, allowed_grid_ids=grid_ids, target_grid_ids=[226], k=4)
+corrupt.loc[corrupt['Grid_ID'] == _probe_cell, 'Value'] = 9999.0
+dirty = prep.compute_spatial_lag(corrupt, allowed_grid_ids=grid_ids, target_grid_ids=[_probe_cell], k=4)
 check('lag identical after replacing the cell\'s own readings with 9999',
       lag_all['pm25_spatial_lag'].equals(dirty['pm25_spatial_lag']))
 

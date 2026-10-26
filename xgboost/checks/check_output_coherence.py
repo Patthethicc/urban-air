@@ -85,16 +85,22 @@ clin = np.clip(raw, 0, None)
 print(f'  outer fold {fold}: raw ridge range {raw.min():.1f} to {raw.max():.1f} | '
       f'{int((raw < 0).sum())} negative predictions')
 print(f'  R2 raw {r2_score(te["Value"], raw):.3f} | R2 clipped at 0 {r2_score(te["Value"], clin):.3f}')
-check('the linear model does extrapolate on at least one fold',
-      bool((raw < 0).sum() > 0), f'{int((raw < 0).sum())} negative predictions in fold {fold}')
-for f in [0, 2]:
+
+# The claim is about the LINEAR model's behaviour, not about one particular fold: whether a given fold
+# produces negative predictions depends on which cells landed there. Under the shared split fold 1 has
+# none. Test the claim across every fold instead of asserting it of fold 1 alone.
+_neg_by_fold = {}
+for f in sorted(df_train['outer_fold'].unique()):
     tr_ = df_train[df_train['outer_fold'] != f]
     te_ = df_train[df_train['outer_fold'] == f]
     sc_ = StandardScaler().fit(tr_[ARM_FEATURES['B']])
     m_ = Ridge(alpha=1.0).fit(sc_.transform(tr_[ARM_FEATURES['B']]), tr_['Value'])
     r_ = m_.predict(sc_.transform(te_[ARM_FEATURES['B']]))
+    _neg_by_fold[int(f)] = int((r_ < 0).sum())
     print(f'  outer fold {f}: {int((r_ < 0).sum())} negative predictions, '
           f'R2 {r2_score(te_["Value"], np.clip(r_, 0, None)):.3f}')
+check('the linear model does extrapolate below 0 on at least one fold',
+      any(v > 0 for v in _neg_by_fold.values()), _neg_by_fold)
 
 print('\n3. DOES ARM C READ MORPHOLOGY? (model-side evidence)')
 merged = oof['C'][['Grid_ID', 'DateTime', 'actual', 'predicted']].merge(

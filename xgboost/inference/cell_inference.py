@@ -233,5 +233,24 @@ def infer_timestamp(model, timestamp, *, station_df=None, train_cells=None, k=4,
     out['prediction'] = pred
     out['standin_coverage'] = diag['standin_coverage'].values
     out['history_present'] = diag['history_present'].values
-    out['prediction_usable'] = out['history_present'] & np.isfinite(out['prediction'])
+    # A cell is predictable only if BOTH inputs exist: a stand-in history AND complete morphology. The
+    # grid has 1,540 of 3,696 cells (42%) whose morphology is nodata -- they are water, outside the
+    # building-height coverage, or between buffers. XGBoost answers anyway by routing the NaNs down its
+    # default branch, and on 2025-08-30 that produced a false 35-45 ug/m3 wedge across Manila Bay.
+    # Painting them would present an artefact as a hotspot, so they are marked unusable and go NaN.
+    # `out` carries only geometry columns, so the morphology test must run on `cells`, which is the
+    # frame the grid loader returns (same row order as `out`).
+    _morph_ok = pd.Series(True, index=cells.index)
+    for _c in MORPH_FEATURES:
+        if _c in cells.columns:
+            _morph_ok &= cells[_c].notna()
+    _morph_ok = pd.Series(_morph_ok.to_numpy(), index=out.index)
+    out['morphology_complete'] = _morph_ok
+    out['prediction_usable'] = (out['history_present'] & _morph_ok
+                                & np.isfinite(out['prediction']))
+    # A cell with no history gets NaN lags, and XGBoost sends missing values down a default branch --
+    # it still RETURNS a number, and on this network that number can be 170-240 ug/m3, which painted a
+    # false bright band across Manila Bay. The docstring already promised "rows with no history carry
+    # NaN rather than a fabricated value"; enforce it, so maps, statistics and intervals all agree.
+    out.loc[~out['prediction_usable'], 'prediction'] = np.nan
     return out, X

@@ -4,6 +4,8 @@ _ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 if _ROOT not in _sys.path:
     _sys.path.insert(0, _ROOT)
 
+import os
+
 import data
 import pandas as pd
 import numpy as np
@@ -66,8 +68,14 @@ def build_sensor_to_grid_map(master_csv=None, grid_csv=None,
 
     out = pd.DataFrame(rows)
     out.insert(0, 'fid', range(1, len(out) + 1))
+    # Full 18-column schema, deliberately. This file is the SENSOR -> CELL map, and it is consumed two
+    # ways: `spatial_cv.get_grid_centroids` needs left/right/top/bottom to place a cell, and the
+    # spatial-lag path needs `id` + the sensor coordinates. Stripping it to the 5 columns named in the
+    # docstring broke the centroid path with KeyError: 'left', so the cell geometry and morphology
+    # columns stay. It is a derived file (rewritten on every import), not an input.
     out.to_csv(out_csv, index=False)
-    print(f"Wrote {out_csv}: {len(out)} sensors -> {out['id'].nunique()} unique grid cells")
+    print(f"Wrote {out_csv}: {len(out)} sensors -> {out['id'].nunique()} unique grid cells "
+          f"({len(out)} rows, {len(out.columns)} columns)")
     return out
 
 
@@ -130,6 +138,69 @@ df_final = df_pm25.merge(
                 'ndvi_mean', 'aspect_ratio_mean', 'street_width_mean']],
     on='Location', how='left'
 )
+
+# ---------------------------------------------------------------------------------------------
+# EDA-driven cleaning (eda/eda_results/EDA_Report.md, recommendations 1 and 2)
+# ---------------------------------------------------------------------------------------------
+# The EDA found two artefact classes that should not reach the model:
+#   1. exact / near-zero readings (<= 0.5 ug/m3) at some OpenAQ nodes are sensor-floor or calibration
+#      dropouts, not air. They are dangerous here because the model is a persistence model: a 0.0
+#      becomes the next hour's pm25_lag_1 and teaches it that clean air is possible at the floor.
+#      5,292 rows of 1,487,811 (0.36%).
+#   2. New Year's Eve fireworks produce 300-529 ug/m3 spikes in a 9-hour window per year, which are
+#      real measurements of an atypical event. 1,389 rows (0.09%), 396 of them above 150 ug/m3.
+#      They are masked rather than winsorised: 956.8 ug/m3 occurs OUTSIDE that window, so the tail is
+#      not purely a fireworks artefact and must not be capped globally.
+# Cleaning happens BEFORE the lag engineering on purpose; filtering afterwards would leave 0.0 and
+# fireworks values already baked into pm25_lag_1..4 and the rolling means.
+# Set XGB_CLEAN=off to reproduce the uncleaned run for a sensitivity row.
+CLEAN_FLOOR = os.environ.get('XGB_CLEAN_FLOOR', 'on').strip().lower() not in ('0', 'off', 'false', 'no')
+# NYE masking defaults OFF. Measured on fold 0 (experiments/eda_cleaning_impact.py): training
+# with it masked changes the model by ~0.3% on identical rows (MAE 4.065 -> 4.051), but because
+# it also removes 363 extreme rows from the evaluated set, the reported RMSE falls 1.9% and R2
+# FALLS 0.010. That is a metric effect from deleting rows, not a better model, so it is opt-in:
+# XGB_CLEAN_NYE=on to mask, and report it as a sensitivity row if used.
+CLEAN_NYE = os.environ.get('XGB_CLEAN_NYE', 'off').strip().lower() in ('1', 'on', 'true', 'yes')
+SENSOR_FLOOR = 0.5
+if CLEAN_FLOOR or CLEAN_NYE:
+    _n0 = len(df_final)
+    _drop = pd.Series(False, index=df_final.index)
+    _n_floor = _n_nye = 0
+    if CLEAN_FLOOR:
+        _f = df_final['Value'] <= SENSOR_FLOOR
+        _n_floor = int(_f.sum())
+        _drop |= _f
+    if CLEAN_NYE:
+        _dt = df_final['DateTime']
+        _nye = (((_dt.dt.month == 12) & (_dt.dt.day == 31) & (_dt.dt.hour >= 21)) |
+                ((_dt.dt.month == 1) & (_dt.dt.day == 1) & (_dt.dt.hour < 6)))
+        _n_nye = int((~_drop & _nye).sum())
+        _drop |= _nye
+    df_final = df_final[~_drop].reset_index(drop=True)
+    print("EDA cleaning: dropped %d sensor-floor rows (<= %.1f ug/m3)%s "
+          "(%s -> %s, %.2f%% removed)"
+          % (_n_floor, SENSOR_FLOOR,
+             ' and %d New Year\'s Eve rows' % _n_nye if CLEAN_NYE else ' (NYE masking off)',
+             f'{_n0:,}', f'{len(df_final):,}', 100.0 * (_n0 - len(df_final)) / max(_n0, 1)))
+else:
+    print("EDA cleaning: DISABLED -- floor zeros and New Year's Eve spikes kept")
+
+# ---------------------------------------------------------------------------------------------
+# Optional date window (EDA cohort recommendation, applied as a sensitivity check)
+# ---------------------------------------------------------------------------------------------
+# The QC network grew 8 -> 20 -> 40 sensors, and all 40 are present from 2024-01-01 in this data (the
+# EDA report says April 2024; the converted long files actually start 2023-12-31 16:00 UTC = 2024-01-01
+# PHT, so January is the correct boundary here). Restricting to that window costs 21.1% of rows.
+# Applied BELOW the lag engineering on purpose: a windowed run must not build its lags from pre-window
+# neighbours, or the cohort problem it is meant to remove comes straight back.
+#   set XGB_WINDOW_START=2024-01-01
+WINDOW_START = os.environ.get('XGB_WINDOW_START', '').strip()
+if WINDOW_START:
+    _n0 = len(df_final)
+    df_final = df_final[df_final['DateTime'] >= pd.Timestamp(WINDOW_START)].reset_index(drop=True)
+    print("EDA window: kept rows from %s onward (%s -> %s, %.1f%% removed)"
+          % (WINDOW_START, f'{_n0:,}', f'{len(df_final):,}',
+             100.0 * (_n0 - len(df_final)) / max(_n0, 1)))
 
 print("Engineering temporal features...")
 df_final['Hour'] = df_final['DateTime'].dt.hour
@@ -204,7 +275,7 @@ print(f"Final matrix: X={X.shape}, y={y.shape}, unique groups={len(set(groups))}
 # ---------------------------------------------------------------------------------------------
 
 def compute_spatial_lag(df_clean, allowed_grid_ids, target_grid_ids=None,
-                        mapping_csv_path=MAPPING_CSV, k=4, log_target=True):
+                        mapping_csv_path=MAPPING_CSV, k=4, log_target=True, min_contributors=2):
     """Inverse-distance weighted mean PM2.5 of the k nearest ALLOWED grid cells, per cell per hour.
 
     This is the neighbourhood predictor the paper requires (Section 3.1.5). It is built to be
@@ -304,10 +375,17 @@ def compute_spatial_lag(df_clean, allowed_grid_ids, target_grid_ids=None,
         with np.errstate(invalid='ignore', divide='ignore'):
             lag = np.where(weight_sum > 0, value_sum / weight_sum, np.nan)
 
+        lag_series = np.log1p(lag) if log_target else lag
+        # A lag built from ONE station is that station's reading, not a neighbourhood value: when the
+        # network is thin (the EDA's cohort finding -- 8 QC sensors in 2021, 40 by 2024) a "spatial" lag
+        # would silently act as a second copy of a single neighbour. Require min_contributors reporting
+        # neighbours, otherwise the feature is missing for that cell-hour.
+        too_thin = contributor_count < max(1, int(min_contributors))
+        lag_series = np.where(too_thin, np.nan, lag_series)
         rows.append(pd.DataFrame({
             'Grid_ID': cell,
             'DateTime': own_hours,
-            'pm25_spatial_lag': np.log1p(lag) if log_target else lag,
+            'pm25_spatial_lag': lag_series,
             'pm25_spatial_lag_w': weight_sum,
             'pm25_spatial_lag_n': contributor_count.astype(int),
         }))
