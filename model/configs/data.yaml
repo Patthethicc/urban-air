@@ -19,8 +19,9 @@ paths:
   streets: null                 # OSM road centerlines (gpkg / shp / geojson)
   height_raster: null           # 4 m building height
   ndvi_raster: null             # 10 m Sentinel-2 NDVI
-  boundary: null                # NCR boundary polygon (gpkg / shp / geojson). Optional but recommended: with it the
-                                # coverage check measures how much of the NCR the raster really covers
+  boundary: ../data/Boundaries/ncr_cities.gpkg   # the 17 NCR cities (python -m preprocessing.boundaries, from GADM 4.1). Used by the maps
+                                # (clip to the NCR, city outlines and names) and by the coverage check (how much of the NCR the raster
+                                # covers). A missing file is skipped with a note; null = no boundary
   raster_work_dir: processed/rasters
 
 # ---- Coordinate reference system ---------------------------------------------------------------

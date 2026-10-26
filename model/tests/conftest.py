@@ -18,7 +18,9 @@ def base_cfg():
 
 @pytest.fixture
 def cfg(base_cfg):
-    return deepcopy(base_cfg)
+    out = deepcopy(base_cfg)
+    out["data"]["paths"]["boundary"] = None        # maps are tested on synthetic coordinates: never clip them to the real NCR
+    return out
 
 
 @pytest.fixture

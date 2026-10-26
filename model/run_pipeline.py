@@ -264,6 +264,9 @@ def train(cfg: dict) -> str:
 
     tc, mc = cfg["train"], cfg["model"]
     processed = _paths(cfg)["processed_dir"]
+    if not (Path(processed) / "scalers.json").is_file():
+        raise SystemExit(f"nothing to train on: {processed} has no preprocessed data. Run `--stage preprocess` first, "
+                         "with the same --override settings (data paths, split, cv_assignment) as this command.")
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path(_paths(cfg)["checkpoints_dir"]) / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -463,8 +466,10 @@ def infer(cfg: dict, run_id: str | None, timestamps: list[str], dates: list[str]
 
     Cells without a sensor take the spatial lag of their k nearest stations as PM2.5 history
     (configs/inference.yaml)."""
-    from inference.cell_inference import openaq_only, predict_surface, reference_stations
-    from output.aqi_maps import basemap_settings, render_panels, render_snapshot, reset_basemap_state
+    from inference.cell_inference import _hour_index, openaq_only, predict_surface, reference_stations
+    from output import cartography
+    from output.aqi_maps import (STYLES, basemap_settings, continuous_range, render_panels, render_snapshot,
+                                 reset_basemap_state)
     from output.volume import daily_mean, expand_dates, group_by_date, summarize_date, write_volume
     from training.run_info import write_json
     from uncertainty.geocp_surface import interval_layers
@@ -475,6 +480,8 @@ def infer(cfg: dict, run_id: str | None, timestamps: list[str], dates: list[str]
     run_id = run_id or latest_run_id(cfg)
     _ensure_geocp(cfg, run_id)
     ctx = _inference_context(cfg, run_id)
+    for ts in stamps:                                         # a date without readings behind it stops here, before any folder is made
+        _hour_index(ts, ctx["hourly"], cfg)
     geocp_engine = _load_geocp(cfg, run_id)
     o = cfg["output"]
     reset_basemap_state()
@@ -507,17 +514,38 @@ def infer(cfg: dict, run_id: str | None, timestamps: list[str], dates: list[str]
             write_volume(mean[None], tr, ctx["crs"], str(out_dir / "prediction_daily_mean.tif"), ["24-hour mean"])
 
         sensors = ctx["stations"]
-        for i, label in enumerate(labels):
-            render_snapshot(stack["prediction"][i], tr, ctx["crs"], str(out_dir / "maps" / f"aqi_{label.replace(':', '')}.png"),
-                            f"PM2.5 prediction, {date:%Y-%m-%d} {label}", cfg, o["highlight_threshold"], sensors)
-        if len(group) > 1:
-            render_panels(stack["prediction"], labels, tr, ctx["crs"], str(out_dir / "maps" / "daily_panels.png"),
-                          f"PM2.5 prediction, {date:%Y-%m-%d}", cfg, o["highlight_threshold"], sensors)
-            render_snapshot(mean, tr, ctx["crs"], str(out_dir / "maps" / "daily_mean.png"),
-                            f"24-hour mean of {len(group)} snapshots, {date:%Y-%m-%d}", cfg, o["daily_guideline"], sensors)
+        styles = cartography.settings(cfg)["styles"]
+        bad = [x for x in styles if x not in STYLES]
+        if bad:
+            raise SystemExit(f"output.maps.styles has unknown style(s) {bad}: use any of {list(STYLES)}")
+        cell_m = abs(tr.a)
+        caption = (f"{date:%Y-%m-%d}, run {run_id}; {cell_m:g} m prediction cells (inference.stride_px {cfg['inference']['stride_px']}), "
+                   f"{ctx['crs']}; city boundaries: GADM 4.1." + (" Every cell's history comes from OpenAQ stations only." if only else ""))
+        shared = continuous_range(stack["prediction"], tr, cfg) if "continuous" in styles else None     # one colour scale for all hours of the day
+        files = {"aqi": ("aqi_{h}", "daily_panels", "daily_mean"),                       # file stems per style (the AQI names are the old ones)
+                 "continuous": ("continuous_{h}", "continuous_panels", "continuous_daily_mean")}
+        for style in styles:
+            hourly_stem, panels_stem, mean_stem = files[style]
+            vr = shared if style == "continuous" else None
+            for i, label in enumerate(labels):
+                render_snapshot(stack["prediction"][i], tr, ctx["crs"], str(out_dir / "maps" / f"{hourly_stem.format(h=label.replace(':', ''))}.png"),
+                                f"PM2.5 prediction, {date:%Y-%m-%d} {label}", cfg, o["highlight_threshold"], sensors, style=style,
+                                vrange=vr, caption=caption)
+            if len(group) > 1:
+                render_panels(stack["prediction"], labels, tr, ctx["crs"], str(out_dir / "maps" / f"{panels_stem}.png"),
+                              f"PM2.5 prediction, {date:%Y-%m-%d}", cfg, o["highlight_threshold"], sensors, style=style, vrange=vr,
+                              caption=caption)
+                render_snapshot(mean, tr, ctx["crs"], str(out_dir / "maps" / f"{mean_stem}.png"),
+                                f"24-hour mean of {len(group)} snapshots, {date:%Y-%m-%d}", cfg, o["daily_guideline"], sensors,
+                                style=style, caption=caption)
         from output.aqi_maps import last_basemap
         summary = summarize_date(group, stack["prediction"], stack["width"], cfg)
         summary["lag_stations"] = "OpenAQ only" if only else "all reference stations"
+        for snap, pred in zip(summary["snapshots"], stack["prediction"]):          # cells and coverage as printed in the map titles
+            st = cartography.grid_stats(pred, tr, cfg)
+            snap["map_cells"], snap["map_coverage"] = st["cells"], st["coverage"]
+        summary["map_styles"] = styles
+        summary["clipped_to_ncr"] = cartography.active_boundary(cfg) is not None
         summary["basemap"] = last_basemap() or "none"            # web | vectors | none (plain background)
         summary["basemap_settings"] = basemap_settings(cfg)
         write_json(out_dir / "output_summary.json", summary)
@@ -534,8 +562,11 @@ def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
     import rasterio
     from rasterio.transform import rowcol, xy as cell_xy_of
 
-    from explain.gradcam import attention_profile, grad_cam
-    from explain.gradcam_plots import plot_cam_overlays
+    from explain.gradcam import attention_profile, grad_cam, spread_selection
+    from explain.gradcam_map import plot_gradcam_map
+    from explain.gradcam_plots import plot_band_profile, plot_cam_overlays
+    from explain.morphology_sheet import plot_morphology_sheet
+    from output import cartography
     from inference.cell_inference import cell_temporal_features, gather_patches, openaq_only, reference_stations
     from reporting.spatial_bias import band_names_for
     from training.run_info import write_json
@@ -566,15 +597,31 @@ def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
 
     ctx = _inference_context(cfg, run_id)
     ex = cfg["output"]["explain"]
-    valid = np.flatnonzero(np.isfinite(pred_map.ravel()))
+    boundary = cartography.active_boundary(cfg)
+    ok = np.isfinite(pred_map)
+    if boundary is not None:                                  # hot and cold are ranked inside the NCR, not in the sea or the next provinces
+        ok &= cartography.inside_mask(vol_transform, pred_map.shape, boundary)
+    valid = np.flatnonzero(ok.ravel())
     order = valid[np.argsort(pred_map.ravel()[valid])]
-    groups = {"hot": order[::-1][:int(ex["top_n"])], "cold": order[:int(ex["bottom_n"])]}
+
+    def pick(best_first, n):                                  # the n best cells that are at least min_separation_m apart
+        flat = best_first[:20000]
+        px_, py_ = cell_xy_of(vol_transform, *np.unravel_index(flat, pred_map.shape), offset="center")
+        return flat[spread_selection(np.asarray(px_), np.asarray(py_), n, float(ex.get("min_separation_m", 0)))]
+
+    groups = {"hot": pick(order[::-1], int(ex["top_n"])), "cold": pick(order, int(ex["bottom_n"]))}
     names = band_names_for(_paths(cfg)["master_raster"], cfg)
     t_idx = int(round((ts - ctx["hourly"]["start"]) / pd.Timedelta(cfg["data"]["time"]["freq"])))
 
     ref_ids, ref_xy = reference_stations(ctx["ref_ids"], ctx["ref_xy"], openaq_only(ts, cfg), cfg)    # the same rule as `infer`
 
-    rows, summary = [], {"timestamp": str(ts), "patch_px": px, "attention_quantile": ex["attention_quantile"], "groups": {}}
+    res = cfg["derived"]["raster_resolution_m"]
+    caption = (f"{ts:%Y-%m-%d %H:%M}, run {run_id}; prediction cells of {abs(vol_transform.a):g} m, morphology patches of {px * res:g} m; "
+               "Grad-CAM on the last convolutional layer of the CNN branch; city boundaries: GADM 4.1."
+               + (" The history of every cell comes from OpenAQ stations only." if openaq_only(ts, cfg) else ""))
+    cells = []
+    rows, summary = [], {"timestamp": str(ts), "patch_px": px, "attention_quantile": ex["attention_quantile"], "groups": {},
+                         "ranked_inside_ncr": boundary is not None}
     for group, flat in groups.items():
         r_out, c_out = np.unravel_index(flat, pred_map.shape)
         xs, ys = cell_xy_of(vol_transform, r_out, c_out, offset="center")
@@ -589,16 +636,29 @@ def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
         pred = ctx["scalers"].inverse_y(p_scaled).ravel()
         prof = attention_profile(raw, cam, names, ex["attention_quantile"])
         for r in prof:
-            rows.append({"group": group, "x": float(xs[r["patch"]]), "y": float(ys[r["patch"]]),
+            rows.append({"group": group, "cell_number": r["patch"] + 1, "x": float(xs[r["patch"]]), "y": float(ys[r["patch"]]),
                          "predicted": float(pred[r["patch"]]), **{k: v for k, v in r.items() if k != "patch"}})
-        titles = [f"{group} {pred[i]:.1f} ug/m3\n({xs[i]:.0f}, {ys[i]:.0f})" for i in range(len(cam))]
-        plot_cam_overlays(raw, cam, names, titles, str(out_dir / f"gradcam_{group}_cells.png"),
-                          ex["attention_quantile"], cfg["output"]["dpi"])
+        cells += [{"group": group, "number": i + 1, "x": float(xs[i]), "y": float(ys[i]), "predicted": float(pred[i])}
+                  for i in range(len(cam))]
+        titles = [f"{group.upper()} #{i + 1}\n{pred[i]:.1f} \u00b5g/m\u00b3\n({xs[i]:.0f}, {ys[i]:.0f})" for i in range(len(cam))]
+        plot_cam_overlays(raw, cam, names, titles, str(out_dir / f"gradcam_{group}_cells.png"), ex["attention_quantile"],
+                          cfg["output"]["dpi"], cfg=cfg, px_m=res, caption=caption,
+                          heading=f"Grad-CAM, {group} cells of {ts:%Y-%m-%d %H:%M}")
         by_band = pd.DataFrame([r for r in prof]).groupby("band")["std_units"].mean() if prof else pd.Series(dtype=float)
         summary["groups"][group] = {"cells": int(len(cam)), "mean_prediction": float(pred.mean()),
                                     "attention_std_units_by_band": {k: float(v) for k, v in by_band.items()}}
 
     pd.DataFrame(rows).to_csv(out_dir / "gradcam_attention.csv", index=False)
+    dpi = cfg["output"]["dpi"]
+    if rows:
+        plot_band_profile(rows, names, str(out_dir / "gradcam_band_profile.png"), dpi, cfg=cfg, caption=caption,
+                          heading=f"What the CNN attends to, hot against cold cells ({ts:%Y-%m-%d %H:%M})")
+    plot_gradcam_map(pred_map, vol_transform, ctx["crs"], cells, cfg, str(out_dir / "gradcam_map.png"),
+                     f"PM2.5 prediction, {ts:%Y-%m-%d %H:%M}", stations=ctx["stations"], caption=caption, dpi=dpi)
+    plot_morphology_sheet(_paths(cfg)["master_raster"], cfg, cells, str(out_dir / "morphology_sheet.png"), names,
+                          stations=ctx["stations"], caption=caption, dpi=dpi)
+    summary["hot_cold"] = ("hot = the highest predicted PM2.5 cells of this hour, cold = the lowest "
+                           "(inside the NCR when a boundary is set); Grad-CAM shows which pixels of each cell's patch drove its prediction")
     summary["reading"] = ("std_units > 0: the attended pixels carry higher values of that band than the rest of the "
                           "patch (e.g. dense blocks, deep canyons, wide arterials); inspect the overlays to confirm "
                           "they are aerodynamically plausible structures")

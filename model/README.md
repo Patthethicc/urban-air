@@ -16,7 +16,7 @@ What you get from one run:
 
 > **Status.** Runs on the real data in the repo's `data/` folder: a 10 m Master GeoTIFF (EPSG:32651, 5 bands,
 > 27 × 39 km) and the OpenAQ sensors (44 stations with readings, 2024-08-13 to 2026-10-15). The pipeline runs end to
-> end and 376 tests pass. The numbers quoted in this file come from short smoke runs (2 epochs), so they show that the
+> end and 408 tests pass. The numbers quoted in this file come from short smoke runs (2 epochs), so they show that the
 > wiring works, not what the model can reach. Three things to know before relying on results: the raster stops short of
 > the southern tip of the NCR ([2.14](#214-covering-the-whole-ncr)), a full-resolution city map takes hours on a CPU
 > ([2.6](#26-make-the-maps)), and the pipeline has not been trained to convergence on this data yet.
@@ -160,7 +160,7 @@ to its `sensors/` folder in `configs/data.yaml`, then re-run `preprocess`. The t
 python -m pytest tests -q
 ```
 
-Expect `376 passed` (and 4 skipped, which only apply when `contextily` is not installed) in about a minute. If something fails here, fix it before running anything else.
+Expect `408 passed` (and 4 skipped, which only apply when `contextily` is not installed) in about a minute. If something fails here, fix it before running anything else.
 
 ### 2.3 First run: the whole pipeline on the data folder
 
@@ -333,8 +333,16 @@ The option affects maps and Grad-CAM only: it does not change training, preproce
 | `prediction_volume.tif` | one band per snapshot (band names are the hours) |
 | `lower_volume.tif`, `upper_volume.tif`, `width_volume.tif` | the GeoCP interval, same grid |
 | `prediction_daily_mean.tif` | 24-hour mean (a cell missing in any snapshot stays empty) |
-| `maps/aqi_0800.png` … `daily_panels.png`, `daily_mean.png` | AQI-coloured maps (no outline; `output.outline_above_threshold: true` draws one around cells above 35 µg/m³, and 50 µg/m³ on the daily mean) |
-| `output_summary.json` | share of cells per AQI category, above 35 and 50, mean interval width, which basemap was used |
+| `maps/aqi_0800.png` … `daily_panels.png`, `daily_mean.png` | maps on the Philippine AQI bands (no outline; `output.outline_above_threshold: true` draws one around cells above 35 µg/m³, and 50 µg/m³ on the daily mean) |
+| `maps/continuous_0800.png` … `continuous_panels.png`, `continuous_daily_mean.png` | the same predictions on a continuous viridis scale with a colourbar; one scale for all hours of the day |
+| `output_summary.json` | share of cells per AQI category, above 35 and 50, mean interval width, which basemap was used, cells and coverage of every map, which map styles were drawn |
+
+**How the maps are drawn.** Both styles are clipped to the National Capital Region and carry what a thesis figure needs: the 17 city outlines and names, a scale bar, a north arrow, easting and northing in km, the stations, a legend with value ranges and a grey **No data** swatch, panel titles of the form `12:00 (12,322 cells, coverage 1.00)`, a few lines saying what the numbers mean, and a caption (date, run, cell size, boundary source).
+
+- **cells** = grid cells inside the NCR that have a prediction; **coverage** = their share of all cells inside the NCR. A hole (for example the Quezon City cells without history on a 2026 date, if the OpenAQ-only rule is switched off) shows up as coverage below 1.
+- **The clip is display only**: the GeoTIFFs and the other numbers in `output_summary.json` keep every cell of the raster.
+- **The boundary** is `data/Boundaries/ncr_cities.gpkg`, made once with `python -m preprocessing.boundaries --src ../data/Boundaries/raw/gadm41_PHL_2.json --out ../data/Boundaries/ncr_cities.gpkg` from the free GADM 4.1 level-2 file (<https://geodata.ucdavis.edu/gadm/gadm4.1/json/gadm41_PHL_2.json.zip>, academic and non-commercial use, not redistributable, so `data/` stays out of git). It must contain exactly the 17 NCR cities. Without the file the maps still work, unclipped and without city names, with one warning.
+- **Settings** (`output.maps` in `configs/output.yaml`, each also as `--override`): `styles` (`[aqi, continuous]`, or one of them), `clip_to_boundary`, `city_labels`, `scale_bar`, `north_arrow`, `caption`, `metric_notes`, `continuous_cmap`, `continuous_range` (`auto` = the 2nd to 98th percentile of the day inside the NCR, or `[lo, hi]` in µg/m³ to compare days on one scale).
 
 **Smooth band edges.** A coarse grid (for example `stride_px` 5 or 11) used to be drawn as a staircase of squares. The PNG maps
 now interpolate the grid onto a finer one before the AQI colours are assigned, so the edges between bands are smooth curves.
@@ -354,8 +362,7 @@ Per run: `--override output.smooth_maps=false`. Small features (a single hot cel
 background, and each step is skipped quietly if it is not available. No street layer is configured by default,
 so the maps have a plain background (`basemap used: none`). To get a real background:
 
-- offline: set `data.paths.streets` and `data.paths.boundary` in `configs/data.yaml` (the same OSM / boundary
-  files the rasters stage uses);
+- offline: set `data.paths.streets` in `configs/data.yaml` (an OSM street file; the NCR city outlines come from `data.paths.boundary`, which is set by default);
 - online: `pip install contextily` and, for the default CARTO tiles, a free CARTO API key in `model/.env`
   (see below). The tiles are only a picture and never touch coordinates; no Google Maps API is involved;
 - on an offline machine add `--override output.basemap.web_tiles=false` to skip the network completely.
@@ -380,8 +387,16 @@ otherwise, give the whole tile URL in `output.basemap_url` with `${CARTO_API_KEY
 
 **Grad-CAM.** `python run_pipeline.py --stage explain --timestamp "2025-07-01 12:00"` works on a snapshot made by
 `infer` for that date. It needs patches of at least 3 × 3 pixels (320 m / raster resolution), which the 10 m raster
-gives (32 × 32). It writes overlays for the highest- and lowest-predicted cells of the snapshot (`gradcam_hot_cells.png`,
-`gradcam_cold_cells.png`). Note that with a coarse `stride_px` the hot and cold cells are chosen from that coarse map.
+gives (32 × 32). It writes four figures into `explain/<D_HHMM>/`:
+
+| File | Shows |
+|---|---|
+| `gradcam_map.png` | the predicted PM2.5 of that hour on the NCR map, with the explained **hot** cells (red circles) and **cold** cells (blue squares), numbered |
+| `gradcam_hot_cells.png`, `gradcam_cold_cells.png` | one row per numbered cell: every morphology band (with units) with the attended region outlined in orange, a 100 m scale, and the Grad-CAM map with its colourbar |
+| `gradcam_band_profile.png` | hot against cold: for each band, how much higher or lower the attended pixels are than the rest of the patch, averaged over the explained cells |
+| `morphology_sheet.png` | the five raster bands mapped over the NCR in quantile classes with range legends (what the CNN branch gets to see), with the explained cells marked |
+
+**Hot and cold** are the highest- and lowest-predicted cells of that hour (`output.explain.top_n` / `bottom_n`, six each). They are ranked inside the NCR and no two may be closer than `output.explain.min_separation_m` (1,000 m), so they are different places and not one hotspot's neighbours. **Grad-CAM** shows which pixels of a cell's 320 m patch drove its prediction; the orange line encloses the top 20 % of that attention (`output.explain.attention_quantile`). Attention shows where the model looked, not why PM2.5 is high: read it next to the morphology sheet. Note that with a coarse `stride_px` the hot and cold cells are chosen from that coarse map.
 
 ### 2.7 Tune hyperparameters, then train with them
 
@@ -616,8 +631,8 @@ COVERAGE: INCOMPLETE: part of the study area is cropped away
 raster does not reach the southern tip of the NCR. The pipeline cannot invent morphology data there: you need a raster
 that extends further south (and possibly north: check the northern part of Caloocan and Valenzuela as well).
 
-**To measure it properly,** set `data.paths.boundary` to the NCR boundary polygon (gpkg / shp / geojson). The report then
-also gives the share of the NCR area the raster covers and how many km are missing on each side.
+**To measure it properly,** `data.paths.boundary` points at the NCR city polygons (`data/Boundaries/ncr_cities.gpkg`, built as in [2.6](#26-make-the-maps)). The report then
+also gives the share of the NCR area the raster covers and how many km are missing on each side (with the GADM 4.1 boundary: 93.7 % covered, 5.5 km missing in the south and 3.3 km in the north). A missing file is only a note, not an error.
 `data.coverage.strict: true` makes `preprocess` stop while coverage is incomplete.
 
 Two other facts about the raster: it is a plain rectangle with data everywhere (no nodata outside the NCR), so city
@@ -809,9 +824,9 @@ On the last convolutional layer of the CNN: channel weights are the mean gradien
 map is the ReLU of the weighted sum of activations, rescaled to [0, 1] per patch. It is the gradient of the
 full prediction, so it shows what in the patch mattered *given the temporal history*. For the highest- and
 lowest-predicted cells of a snapshot it writes overlay figures (every morphology band with the attended region
-outlined), `gradcam_attention.csv`, and a summary giving for each band how many patch standard deviations higher
+outlined), a map of where those cells are, a hot-against-cold band chart, a morphology sheet, `gradcam_attention.csv`, and a summary giving for each band how many patch standard deviations higher
 the attended pixels are than the rest of the patch (positive values for building density, aspect ratio, height
-or street width point at dense blocks, canyons and arterials). The overlays are still to be inspected by eye.
+or street width point at dense blocks, canyons and arterials; [2.6](#26-make-the-maps) lists the figures). The overlays are still to be inspected by eye.
 SHAP belongs to the XGBoost branch and is not part of this pipeline.
 
 ### 3.11 The coordinate system
@@ -855,7 +870,8 @@ snapshots/<run_id>/
               spatial_bias.json  residuals_by_cell.csv
     surface/<YYYYMMDD>/   prediction_volume.tif  lower_volume.tif  upper_volume.tif  width_volume.tif
                           prediction_daily_mean.tif  output_summary.json  maps/*.png
-    explain/<YYYYMMDD_HHMM>/   gradcam_hot_cells.png  gradcam_cold_cells.png  gradcam_attention.csv  gradcam_summary.json
+    explain/<YYYYMMDD_HHMM>/   gradcam_map.png  gradcam_hot_cells.png  gradcam_cold_cells.png  gradcam_band_profile.png  morphology_sheet.png
+                               gradcam_attention.csv  gradcam_summary.json
 ```
 
 ### Visualizations at a glance
@@ -871,8 +887,12 @@ snapshots/<run_id>/
 | `lisa_map.png` | `bias` | grid cells coloured by LISA cluster (or by mean residual if LISA was not run); Moran's I in the title |
 | `lisa_on_bands.png` | `bias` | the LISA clusters laid over every morphology band |
 | `convergence_final.png` | `tune` | validation loss of every Bayesian-search trial and the best so far |
-| `maps/aqi_HHMM.png` | `infer` | one map per snapshot on the Philippine AQI scale, stations marked (optional outline above 35 µg/m³, off by default) |
+| `maps/aqi_HHMM.png` | `infer` | one map per snapshot on the Philippine AQI scale, clipped to the NCR with city names, scale bar and north arrow, stations marked (optional outline above 35 µg/m³, off by default) |
 | `maps/daily_panels.png` | `infer` | the day's snapshots side by side on one scale |
+| `maps/continuous_HHMM.png`, `continuous_panels.png`, `continuous_daily_mean.png` | `infer` | the same predictions on a continuous viridis scale with a colourbar (the 2×2 panel figure) |
+| `gradcam_map.png` | `explain` | the explained hot and cold cells, numbered, on the predicted PM2.5 map |
+| `gradcam_band_profile.png` | `explain` | per band, what the attended pixels look like for hot against cold cells |
+| `morphology_sheet.png` | `explain` | the five morphology bands mapped over the NCR, with the explained cells marked |
 | `maps/daily_mean.png` | `infer` | the 24-hour mean on the same scale (optional outline at the 50 µg/m³ guideline, off by default) |
 | `gradcam_hot_cells.png`, `gradcam_cold_cells.png` | `explain` | for the highest / lowest predicted cells: every morphology band with the attended region outlined, and the Grad-CAM map |
 
@@ -924,7 +944,7 @@ State these when reporting results.
 
 ## 6. How it was checked
 
-`python -m pytest tests -q` runs 380 tests, 376 of which apply when `contextily` is installed (about 1 min), covering: configuration and the CRS check; the reset command; the infer / geocp workflow; the coverage check; the QC data conversion and the `qcdata_` loader; progress, hang detection and timeouts (also for the tune stage); the accuracy report (including the by-year table) and the snapshot layout, the OpenAQ-only history for 2026 dates, the map outline switch and the smooth band edges, the combined datasets, pinned CV folds and the run-comparison tool; shared-patch training; shapes and
+`python -m pytest tests -q` runs 412 tests, 408 of which apply when `contextily` is installed (about 1 min), covering: configuration and the CRS check; the reset command; the infer / geocp workflow; the coverage check; the QC data conversion and the `qcdata_` loader; progress, hang detection and timeouts (also for the tune stage); the accuracy report (including the by-year table) and the snapshot layout, the OpenAQ-only history for 2026 dates, the NCR-clipped maps and explain figures, the map outline switch and the smooth band edges, the combined datasets, pinned CV folds and the run-comparison tool; shared-patch training; shapes and
 gradient flow into both branches (pool and flatten); trainer and checkpoint round trips; metrics against
 hand-computed values; gap capping; patch/window alignment checked by hand; partitioning; the spatial lag
 (hand-computed, leakage, per-fold); scalers; GeoCP (normalisation, clipping, Table 4.2 metrics, zones, grid

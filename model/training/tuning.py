@@ -140,6 +140,30 @@ def apply_tuned(cfg: dict, ref: str) -> dict:
 
 # ------------------------------------------------------------------ the search
 _PACE_PENDING = [True]                   # the "at this pace ..." projection is printed once per tuning run
+_RUN = {"started": None, "total_trials": 0, "done": 0, "trial_s": 0.0, "evals_total": 0, "evals_done": 0, "eval_s": 0.0}
+
+
+def start_run_clock(total_trials: int, evals: int) -> None:
+    """Start the clock of a whole tuning run: `total_trials` over all searches and `evals` evaluation fits (nested tuning)."""
+    _RUN.update(started=time.time(), total_trials=int(total_trials), done=0, trial_s=0.0, evals_total=int(evals), evals_done=0, eval_s=0.0)
+
+
+def eta_line(run: dict, now: float | None = None) -> str:
+    """'elapsed 1.2 h, 5/48 trials, about 9.1 h left, expected finish Tue 27 Oct 16:40'. The estimate is the trials still to run at the
+    average trial time so far, plus the evaluation fits still to run at the average evaluation time (not counted until one has been
+    timed). It is a projection: later searches can be faster or slower than the first ones."""
+    now = time.time() if now is None else now
+    done, total = run["done"], run["total_trials"]
+    evals_left = run["evals_total"] - run["evals_done"]
+    avg_trial = run["trial_s"] / done if done else 0.0
+    avg_eval = run["eval_s"] / run["evals_done"] if run["evals_done"] else 0.0
+    left = max(total - done, 0) * avg_trial + evals_left * avg_eval
+    text = f"elapsed {format_duration(now - run['started'])}, {done}/{total} trials"
+    if total - done <= 0 and evals_left <= 0:
+        return text + ", all trials done"
+    finish = datetime.fromtimestamp(now + left)
+    note = " (the evaluation fits are not timed yet: add a little)" if evals_left and not run["evals_done"] else ""
+    return f"{text}, about {format_duration(left)} left, expected finish {finish:%a %d %b %H:%M}{note}"
 
 
 def gp_search(objective, space_cfg: dict, tune_cfg: dict, log_path: Path | None = None, tag: str = "",
@@ -178,6 +202,10 @@ def gp_search(objective, space_cfg: dict, tune_cfg: dict, log_path: Path | None 
             print(f"  at this pace one search of {n_calls} trials takes about {format_duration(one_search)}, "
                   f"{searches} search{'es' if searches > 1 else ''} about {format_duration(searches * one_search)} "
                   "(the evaluation fits on all rows come on top)", flush=True)
+        if _RUN["started"] is not None:                           # the timer of a whole tuning run (set by nested_tuning)
+            _RUN["done"] += 1
+            _RUN["trial_s"] += took
+            print("  timer: " + eta_line(_RUN), flush=True)
         if log_path is not None:
             write_json(log_path, {"tag": tag, "trials": trials})
         return loss
@@ -249,6 +277,7 @@ def nested_tuning(cfg: dict) -> Path:
     searches = (int(t["outer_folds"]) if nested else 0) + 1
     fits = searches * int(t["n_calls"]) * int(t["inner_folds"])
     _PACE_PENDING[0] = True
+    start_run_clock(searches * int(t["n_calls"]), int(t["outer_folds"]) if nested else 0)
     status = runtime_guard.status_every_s()
     print(f"tuning plan: {searches} search{'es' if searches > 1 else ''} x {t['n_calls']} trials x {t['inner_folds']} inner fits"
           f" = {fits} fits on {'all rows' if stride == 1 else f'every {stride}th row'}"
@@ -272,8 +301,11 @@ def nested_tuning(cfg: dict) -> Path:
             trainer = Trainer(DualBranchNet(c["model"]), tc, c["model"], "")
             print(f"[outer {k}] evaluation fit with the winning hyperparameters: {len(fit_ok):,} rows, "
                   f"{tc['epochs']} epochs", flush=True)
+            t_eval = time.time()
             trainer.fit(make_loader(Subset(ds, fit_ok), tc, True), None, epochs=tc["epochs"], verbose=True,
                         tag=f"[outer {k}] evaluation fit")           # all rows: the same progress lines as training
+            _RUN["evals_done"] += 1
+            _RUN["eval_s"] += time.time() - t_eval
             _, y_true, y_pred = trainer.evaluate(make_loader(Subset(ds, test_ok), tc, False))
             metrics = compute_all(scalers.inverse_y(y_true), scalers.inverse_y(y_pred))
             outer_results.append({
@@ -318,7 +350,8 @@ def nested_tuning(cfg: dict) -> Path:
 
     from reporting.plotters import plot_search_convergence
     plot_search_convergence(final["trials"], str(tune_dir / "convergence_final.png"))
-    print(f"tuning saved to {tune_dir}")
+    print(f"tuning saved to {tune_dir}  (the whole run took {format_duration(time.time() - _RUN['started'])})")
+    _RUN["started"] = None                                    # a later gp_search outside a tuning run prints no timer
     print("Train with them:  python run_pipeline.py --stage train --tuned     (applies to that command only)")
     print("Make them the default: copy best_hyperparameters.json -> as_overrides into configs/train.yaml and model.yaml")
     return tune_dir

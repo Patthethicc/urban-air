@@ -4,6 +4,8 @@ A sensor outside the raster is skipped by the loader, which silently crops the s
 visible: which sensors are outside (and how far), and, if data.paths.boundary is set, how much of the NCR boundary the
 raster covers and how many km are missing on each side.
 """
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -67,7 +69,9 @@ def coverage_report(cfg: dict) -> dict:
     }
     complete = not outside
 
-    if d["paths"].get("boundary"):
+    if d["paths"].get("boundary") and not Path(d["paths"]["boundary"]).is_file():
+        report["boundary_missing"] = d["paths"]["boundary"]           # e.g. a Kaggle clone without data/Boundaries: not an error
+    elif d["paths"].get("boundary"):
         import geopandas as gpd
         from shapely.geometry import box
 
@@ -99,6 +103,9 @@ def format_coverage(r: dict) -> str:
         lines.append(f"NCR boundary ({b['area_km2']:.0f} km2): {b['covered_fraction']:.1%} covered by the raster")
         for side, km in b["missing_km"].items():
             lines.append(f"  boundary extends {km:.1f} km beyond the {side} edge of the raster")
+    elif r.get("boundary_missing"):
+        lines.append(f"NCR boundary: {r['boundary_missing']} not found, so coverage of the NCR itself is judged by the sensors only "
+                     "(python -m preprocessing.boundaries builds it; the maps are then not clipped to the NCR)")
     else:
         lines.append("NCR boundary: not set (data.paths.boundary), so coverage of the NCR itself is judged by the sensors only")
     lines.append("COVERAGE: " + ("complete" if r["complete"] else "INCOMPLETE: part of the study area is cropped away"))

@@ -15,6 +15,7 @@ from scipy import ndimage  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
+from output import cartography  # noqa: E402
 from reporting.plotters import INK, INK2, SURFACE  # noqa: E402
 
 
@@ -100,6 +101,7 @@ _STATE: dict = {"web_failed": False, "reachable": {}, "last": None}
 def reset_basemap_state() -> None:
     """Forget a previous tile failure / connectivity result / last choice (a new run, or tests)."""
     _STATE.update(web_failed=False, reachable={}, last=None)
+    cartography.reset()
 
 
 def last_basemap():
@@ -328,19 +330,77 @@ def _add_basemap(ax, crs, cfg: dict):
     return kind
 
 
-def draw_surface(ax, values: np.ndarray, transform, crs, cfg: dict, threshold=None, stations=None, title=None):
-    """One snapshot on `ax`: AQI-coloured cells, optional outline of cells above `threshold`
-    (output.outline_above_threshold), optional stations."""
+STYLES = ("aqi", "continuous")
+UNIT = "PM2.5 (µg/m³)"
+NOTE_PM25 = ("PM2.5 = predicted hourly fine particulate matter in µg/m³, one value per grid cell. Cells = grid cells inside the NCR "
+             "that have a prediction; coverage = their share of all cells inside the NCR.")
+NOTE_HISTORY = ("A cell without a sensor takes the PM2.5 of its 5 nearest training stations as its recent history, together with its "
+                "320 m morphology patch. White dots are the monitoring stations.")
+NOTE_AQI = ("Colours are the Philippine AQI bands (DENR DAO 2020-14); only the Good, Fair and Unhealthy-for-sensitive-groups limits "
+            "are confirmed (configs/output.yaml).")
+NOTE_CONTINUOUS = ("Continuous colour scale, the same for every panel of the day, from the 2nd to the 98th percentile of the "
+                   "predictions inside the NCR (values beyond are shown in the end colours).")
+
+
+def view_extent(extent: tuple, cfg: dict) -> tuple:
+    """The part of the raster to show: the whole grid, or with a boundary the NCR's bounding box (plus a small margin) where it
+    overlaps the grid. (left, right, bottom, top)"""
+    boundary = cartography.active_boundary(cfg)
+    left, right, bottom, top = extent
+    if boundary is None:
+        return extent
+    minx, miny, maxx, maxy = boundary.total_bounds
+    mx, my = 0.01 * (maxx - minx), 0.01 * (maxy - miny)
+    return (max(left, minx - mx), min(right, maxx + mx), max(bottom, miny - my), min(top, maxy + my))
+
+
+def continuous_range(arrays, transform, cfg: dict) -> tuple:
+    """(vmin, vmax) of the continuous colour scale: output.maps.continuous_range = [lo, hi], or 'auto' = the 2nd and 98th percentile of
+    the predictions inside the NCR over all `arrays` (so every panel of a day shares one scale)."""
+    fixed = cartography.settings(cfg)["continuous_range"]
+    if fixed != "auto":
+        return float(fixed[0]), float(fixed[1])
+    boundary = cartography.active_boundary(cfg)
+    vals = []
+    for a in arrays:
+        a = np.asarray(a, dtype=float)
+        if boundary is not None:
+            a = np.where(cartography.inside_mask(transform, a.shape, boundary), a, np.nan)
+        vals.append(a[np.isfinite(a)])
+    v = np.concatenate(vals) if vals else np.array([])
+    if v.size == 0:
+        return 0.0, 1.0
+    lo, hi = np.percentile(v, [2, 98])
+    return (float(lo), float(hi)) if hi > lo else (float(lo) - 0.5, float(hi) + 0.5)
+
+
+def draw_surface(ax, values: np.ndarray, transform, crs, cfg: dict, threshold=None, stations=None, title=None, *,
+                 style: str = "aqi", vrange=None):
+    """One snapshot on `ax`: AQI-coloured cells (style 'aqi') or a continuous colour scale (style 'continuous'), clipped to the NCR
+    when a boundary is set, with city outlines and names, scale bar and north arrow (output.maps), the optional outline of cells above
+    `threshold` (output.outline_above_threshold) and the stations. The title gets '(N cells, coverage C)'. Returns the image drawn
+    (for a colourbar)."""
+    if style not in STYLES:
+        raise ValueError(f"map style must be one of {STYLES}, got {style!r}")
     bins = cfg["output"]["aqi"]["bins"]
     left, right, bottom, top = extent = extent_of(transform, values.shape)
-    ax.set_xlim(left, right)
-    ax.set_ylim(bottom, top)
+    vl, vr, vb, vt = view_extent(extent, cfg)
+    ax.set_xlim(vl, vr)
+    ax.set_ylim(vb, vt)
+    cartography.fill_no_data(ax, cfg)
     based = _add_basemap(ax, crs, cfg) == "web"                  # tiles are busy: let them show through the cells
 
-    cmap = ListedColormap([b["color"] for b in bins]).with_extremes(bad=(0, 0, 0, 0))
-    shown = display_grid(values, cfg)                            # smoothed (or the raw cells), same area either way
-    ax.imshow(np.ma.masked_invalid(categorize(shown, cfg)), extent=extent, origin="upper", cmap=cmap,
-              vmin=-0.5, vmax=len(bins) - 0.5, interpolation="nearest", alpha=0.72 if based else 1.0, zorder=2)
+    shown = cartography.clip_display(display_grid(values, cfg), (left, right, bottom, top), cfg)    # smoothed (or the raw cells), same area either way
+    alpha = 0.72 if based else 1.0
+    if style == "aqi":
+        cmap = ListedColormap([b["color"] for b in bins]).with_extremes(bad=(0, 0, 0, 0))
+        image = ax.imshow(np.ma.masked_invalid(categorize(shown, cfg)), extent=extent, origin="upper", cmap=cmap,
+                          vmin=-0.5, vmax=len(bins) - 0.5, interpolation="nearest", alpha=alpha, zorder=2)
+    else:
+        vmin, vmax = vrange if vrange is not None else continuous_range([values], transform, cfg)
+        cmap = plt.get_cmap(cartography.settings(cfg)["continuous_cmap"]).with_extremes(bad=(0, 0, 0, 0))
+        image = ax.imshow(np.ma.masked_invalid(shown), extent=extent, origin="upper", cmap=cmap, vmin=vmin, vmax=vmax,
+                          interpolation="nearest", alpha=alpha, zorder=2)
 
     if threshold is not None and _outline_on(cfg):
         above = np.where(np.isfinite(shown), shown > threshold, False)
@@ -350,50 +410,78 @@ def draw_surface(ax, values: np.ndarray, transform, crs, cfg: dict, threshold=No
             ax.contour(xs, ys, above.astype(float), levels=[0.5], colors=[INK], linewidths=1.1, zorder=4)
     if stations is not None and len(stations):
         ax.scatter(stations["x"], stations["y"], s=14, c=SURFACE, edgecolors=INK, linewidths=0.8, zorder=5)
+    ax.set_xlim(vl, vr)
+    ax.set_ylim(vb, vt)
     ax.set_aspect("equal")
-    ax.ticklabel_format(useOffset=False, style="plain")
-    ax.tick_params(colors=INK2, labelsize=7)
+    cartography.km_axes(ax)
+    cartography.furniture(ax, cfg)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     if title:
-        ax.set_title(title, color=INK, fontsize=10, loc="left")
+        s = cartography.grid_stats(values, transform, cfg)
+        sep = "\n" if len(title) > 22 else "   "                  # a long title would run past the map: put the counts on a second line
+        ax.set_title(f"{title}{sep}({s['cells']:,} cells, coverage {s['coverage']:.2f})", color=INK, fontsize=10, loc="left")
+    return image
 
 
 def _stations(cfg: dict, stations):
     return stations if cfg["output"]["show_stations"] else None
 
 
-def render_snapshot(values, transform, crs, path: str, title: str, cfg: dict, threshold, stations=None) -> str:
+def _notes(style: str) -> list[str]:
+    return [NOTE_PM25, NOTE_HISTORY, NOTE_AQI if style == "aqi" else NOTE_CONTINUOUS]
+
+
+def _legend(fig, cfg: dict, style: str, threshold, bottom: float, ncol: int, fontsize: float) -> None:
+    """AQI ranges (aqi style) or just the 'No data' swatch (continuous), above the footer."""
+    handles = (_legend_entries(cfg, threshold, f"outline: above {threshold} ug/m3") if style == "aqi" else []) + [cartography.no_data_patch()]
+    fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, bottom), ncol=ncol, fontsize=fontsize, frameon=False,
+               labelcolor=INK2)
+
+
+def render_snapshot(values, transform, crs, path: str, title: str, cfg: dict, threshold, stations=None, *, style: str = "aqi",
+                    vrange=None, caption: str | None = None) -> str:
     o = cfg["output"]
-    fig, ax = plt.subplots(figsize=(7.2, 6.4), facecolor=SURFACE)
+    fig, ax = plt.subplots(figsize=(6.6, 7.6), facecolor=SURFACE)
     ax.set_facecolor(SURFACE)
-    draw_surface(ax, values, transform, crs, cfg, threshold, _stations(cfg, stations), title)
-    fig.legend(handles=_legend_entries(cfg, threshold, f"outline: above {threshold} ug/m3"), loc="lower center",
-               ncol=2, fontsize=7.5, frameon=False, labelcolor=INK2)
-    fig.tight_layout(rect=(0, 0.12, 1, 1))
+    image = draw_surface(ax, values, transform, crs, cfg, threshold, _stations(cfg, stations), title, style=style, vrange=vrange)
+    if style == "continuous":
+        fig.colorbar(image, ax=ax, shrink=0.8, pad=0.02).set_label(UNIT, color=INK2, fontsize=8)
+    foot = cartography.footer(fig, cfg, caption, _notes(style))
+    _legend(fig, cfg, style, threshold, foot + 0.005, 2, 7.5)
+    fig.tight_layout(rect=(0, foot + 0.13, 1, 1))
     fig.savefig(path, dpi=o["dpi"], facecolor=SURFACE)
     plt.close(fig)
     return path
 
 
 def render_panels(stack, labels: list[str], transform, crs, path: str, title: str, cfg: dict, threshold,
-                  stations=None) -> str:
-    """All snapshots of a day side by side (shared AQI scale)."""
+                  stations=None, *, style: str = "aqi", vrange=None, caption: str | None = None) -> str:
+    """All snapshots of a day side by side (one shared scale: the AQI bands, or one continuous colourbar)."""
     o = cfg["output"]
     n = len(stack)
     ncols = 2 if n > 1 else 1
     nrows = int(np.ceil(n / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(6.2 * ncols, 5.6 * nrows + 0.8), facecolor=SURFACE, squeeze=False)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.0 * ncols + (1.0 if style == "continuous" else 0), 6.0 * nrows + 0.9),
+                             facecolor=SURFACE, squeeze=False)
+    if style == "continuous" and vrange is None:
+        vrange = continuous_range(stack, transform, cfg)
+    image = None
     for i, ax in enumerate(axes.ravel()):
         if i >= n:
             ax.axis("off")
             continue
         ax.set_facecolor(SURFACE)
-        draw_surface(ax, stack[i], transform, crs, cfg, threshold, _stations(cfg, stations), labels[i])
+        image = draw_surface(ax, stack[i], transform, crs, cfg, threshold, _stations(cfg, stations), labels[i], style=style, vrange=vrange)
     fig.suptitle(title, color=INK, fontsize=11, x=0.02, ha="left")
-    fig.legend(handles=_legend_entries(cfg, threshold, f"outline: above {threshold} ug/m3"), loc="lower center",
-               ncol=3, fontsize=8, frameon=False, labelcolor=INK2)
-    fig.tight_layout(rect=(0, 0.07, 1, 0.97), h_pad=2.5)
+    foot = cartography.footer(fig, cfg, caption, _notes(style))
+    _legend(fig, cfg, style, threshold, foot + 0.005, 3, 8)
+    right = 0.9 if style == "continuous" else 1.0
+    bottom = foot + 0.06
+    fig.tight_layout(rect=(0, bottom, right, 0.97), h_pad=2.5)
+    if style == "continuous" and image is not None:
+        cax = fig.add_axes([0.92, bottom + 0.15 * (0.97 - bottom), 0.018, 0.6 * (0.97 - bottom)])
+        fig.colorbar(image, cax=cax).set_label(UNIT, color=INK2, fontsize=9)
     fig.savefig(path, dpi=o["dpi"], facecolor=SURFACE)
     plt.close(fig)
     return path

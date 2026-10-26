@@ -40,6 +40,20 @@ def grad_cam(model, patches: np.ndarray, temporal: np.ndarray, device: str = "cp
     return (cam / peak).cpu().numpy(), pred.detach().cpu().numpy().ravel()
 
 
+def spread_selection(xs, ys, n: int, min_separation_m: float) -> np.ndarray:
+    """Positions (into xs / ys, which are ordered best first) of the first `n` points that are at least `min_separation_m` from every
+    point already kept. Without it the 6 hottest cells are usually neighbours of one hotspot; with it they are 6 different places.
+    min_separation_m = 0 keeps the first n."""
+    d2 = float(min_separation_m) ** 2
+    kept: list[int] = []
+    for i in range(len(xs)):
+        if all((xs[i] - xs[j]) ** 2 + (ys[i] - ys[j]) ** 2 >= d2 for j in kept):
+            kept.append(i)
+            if len(kept) == n:
+                break
+    return np.array(kept, dtype=int)
+
+
 def attention_profile(raw_patches: np.ndarray, cam: np.ndarray, band_names: list[str], quantile: float = 0.8) -> list[dict]:
     """For each patch and band: mean raster value on the ATTENDED pixels (CAM >= its `quantile`, and > 0)
     versus the whole patch, in patch-standard-deviation units (positive = the model looks at the higher

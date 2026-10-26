@@ -20,8 +20,10 @@ LR_SPACE = {"learning_rate": {"type": "real", "low": 1e-4, "high": 1e-2, "prior"
 def _fresh_limits():
     configure({})
     tuning._PACE_PENDING[0] = True
+    tuning._RUN["started"] = None
     yield
     configure({})
+    tuning._RUN["started"] = None
 
 
 def _tune(**kw):
@@ -172,6 +174,11 @@ def test_the_whole_tune_stage_reports_its_plan_every_search_every_trial_and_the_
     import re
     assert re.search(r"^\[outer 0\] evaluation fit epoch +\d+/\d+  train \d", out, re.M)       # the real epoch line, not a status line
     assert "tuned model on held-out stations: RMSE" in out
+    timers = [x for x in out.splitlines() if x.startswith("  timer: ")]
+    assert len(timers) == 6                                                      # 3 searches x 2 trials: one timer line after every trial
+    assert "1/6 trials" in timers[0] and "expected finish" in timers[0] and "evaluation fits are not timed yet" in timers[0]
+    assert "5/6 trials" in timers[4] and "expected finish" in timers[4] and "not timed yet" not in timers[4]       # both evaluations ran by then
+    assert timers[5].endswith("6/6 trials, all trials done") and "the whole run took" in out
     assert any(x.startswith("  ... [") for x in out.splitlines())                 # a position line from a quiet fit
     best = json.loads((folder / "best_hyperparameters.json").read_text(encoding="utf-8"))
     assert "hyperparameters" in best and best["as_overrides"]
@@ -179,3 +186,20 @@ def test_the_whole_tune_stage_reports_its_plan_every_search_every_trial_and_the_
 
 def test_the_shipped_status_interval_is_five_minutes(base_cfg):
     assert base_cfg["train"]["runtime"]["status_every_s"] == 300 and rg.status_every_s() >= 0
+
+
+def test_the_timer_line_projects_the_finish_from_the_trials_and_the_evaluation_fits_done_so_far():
+    from datetime import datetime
+    run = {"started": 1000.0, "total_trials": 10, "done": 4, "trial_s": 400.0, "evals_total": 2, "evals_done": 1, "eval_s": 300.0}
+    text = tuning.eta_line(run, now=1500.0)                                       # 6 trials at 100 s + 1 evaluation at 300 s = 900 s left
+    finish = datetime.fromtimestamp(1500.0 + 900.0)
+    assert text == f"elapsed 8 min, 4/10 trials, about 15 min left, expected finish {finish:%a %d %b %H:%M}"
+    untimed = tuning.eta_line({**run, "evals_done": 0, "eval_s": 0.0}, now=1500.0)    # no evaluation timed yet: say so, count the trials only
+    assert "about 10 min left" in untimed and "evaluation fits are not timed yet" in untimed
+    assert tuning.eta_line({**run, "done": 10, "trial_s": 1000.0, "evals_done": 2, "eval_s": 600.0}, now=2000.0) == "elapsed 17 min, 10/10 trials, all trials done"
+    assert tuning.eta_line({**run, "total_trials": 4, "evals_total": 0, "evals_done": 0}, now=1500.0).endswith("all trials done")
+
+
+def test_a_search_outside_a_tuning_run_prints_no_timer(capsys):
+    gp_search(lambda hp: (hp["learning_rate"], {}), LR_SPACE, _tune())
+    assert "timer:" not in capsys.readouterr().out

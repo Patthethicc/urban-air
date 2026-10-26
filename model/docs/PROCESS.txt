@@ -311,7 +311,11 @@ without a sensor use the spatial-lag stand-in (section 7).
 Per date, in snapshots/<run>/surface/<YYYYMMDD>/:
   prediction_volume.tif, lower_volume.tif, upper_volume.tif, width_volume.tif   one band per snapshot
   prediction_daily_mean.tif     24-hour mean of the snapshots (a cell missing in any snapshot stays empty)
-  maps/aqi_HHMM.png, daily_panels.png, daily_mean.png
+  maps/aqi_HHMM.png, daily_panels.png, daily_mean.png                       AQI bands
+  maps/continuous_HHMM.png, continuous_panels.png, continuous_daily_mean.png  continuous (viridis) scale
+  Both styles are clipped to the NCR (data.paths.boundary = the 17 city polygons from GADM 4.1, built by preprocessing/boundaries.py), with city
+  names, scale bar, north arrow, km axes, a legend with ranges and 'No data', titles 'HH:MM (N cells, coverage C)', notes and a caption
+  (output.yaml maps:). Display only: the GeoTIFFs keep every cell. Without the boundary file the maps are unclipped, with a warning.
   output_summary.json           level, share of cells above 35 ug/m3, AQI category shares, interval width;
                                 daily mean: cells above 50
 Maps: gradient on the Philippine AQI scale (configs/output.yaml aqi.bins). The PNGs draw a coarse grid smoothly: the values are
@@ -350,8 +354,10 @@ Grad-CAM on the LAST convolutional layer of the CNN branch: channel weights = me
 prediction, map = ReLU(weighted sum of the activations), rescaled to [0, 1] per patch (convolution
 padding keeps it the size of the patch, so it overlays the input). It is the gradient of the full
 prediction, so it shows what in this patch mattered given the temporal history. For the highest- and
-lowest-predicted cells (output.yaml explain.top_n / bottom_n) it writes gradcam_hot_cells.png and
-gradcam_cold_cells.png (every morphology band with the attended region outlined), gradcam_attention.csv
+lowest-predicted cells (output.yaml explain.top_n / bottom_n, ranked inside the NCR and at least explain.min_separation_m apart) it writes
+gradcam_hot_cells.png and gradcam_cold_cells.png (every morphology band with the attended region outlined), gradcam_map.png (where those cells
+are, numbered, on the predicted map), gradcam_band_profile.png (hot against cold, per band), morphology_sheet.png (the five bands mapped
+over the NCR), gradcam_attention.csv
 and gradcam_summary.json: for each band, how many patch standard deviations higher the attended pixels
 are than the rest of the patch (explain.attention_quantile = top 20 %). Positive values for building
 density, aspect ratio, height or street width point at dense blocks, canyons and arterials; the overlays

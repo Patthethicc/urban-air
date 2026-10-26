@@ -49,8 +49,23 @@ basemap_url: null                    # optional explicit tile URL instead of bas
                                      # "https://basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png?key=${CARTO_API_KEY}"
 basemap_attribution: "© OpenStreetMap contributors © CARTO"   # drawn on the map when basemap_url is used
 show_stations: true       # draw the monitoring stations on the maps
+maps:                     # what the PNG maps and the explain figures are drawn with (display only: GeoTIFFs and numbers never change)
+  styles: [aqi, continuous]   # aqi = Philippine AQI bands (aqi_HHMM.png, daily_panels.png, daily_mean.png);
+                          # continuous = viridis colour scale with a colourbar (continuous_HHMM.png, continuous_panels.png,
+                          # continuous_daily_mean.png). One style or both. Per run: --override "output.maps.styles=[aqi]"
+  clip_to_boundary: true  # show only cells inside the NCR (data.paths.boundary); false = the whole raster rectangle
+  city_labels: true       # draw the NCR city outlines and names (needs the boundary)
+  scale_bar: true
+  north_arrow: true
+  caption: true           # a source line under each figure: date, run, cell size, boundary source
+  metric_notes: true      # a few lines under each figure saying what the numbers and colours mean (cells, coverage, hot and cold, ...)
+  continuous_cmap: viridis
+  continuous_range: auto  # auto = the 2nd to 98th percentile of the day's predictions inside the NCR, shared by all panels;
+                          # or [lo, hi] in ug/m3 to compare days on one fixed scale
 dpi: 150
 explain:                  # Grad-CAM on the CNN branch (--stage explain)
   top_n: 6                # highest-predicted cells of the chosen snapshot
   bottom_n: 6             # lowest-predicted cells
+  min_separation_m: 1000  # no two explained cells closer than this, so the 6 hottest are 6 places and not one hotspot's neighbours
+                          # (0 = just the top and bottom cells)
   attention_quantile: 0.8 # "attended" pixels = the top 20 % of a patch's Grad-CAM values

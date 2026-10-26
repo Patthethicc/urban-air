@@ -147,3 +147,24 @@ def test_tuning_passes_the_assignment_to_the_outer_inner_and_final_folds(small_c
     tuning.nested_tuning(cfg)
     assert [c[0] for c in calls] == ["nested", "final"]
     assert all(k == {"assignment": "by_station", "seed": 11} for _, k in calls)
+
+
+def test_train_without_preprocessed_data_says_what_to_run_and_leaves_no_empty_run_folder(cfg, tmp_path):
+    import run_pipeline
+    cfg["data"]["paths"].update(processed_dir=str(tmp_path / "processed"), checkpoints_dir=str(tmp_path / "checkpoints"))
+    with pytest.raises(SystemExit, match="--stage preprocess"):
+        run_pipeline.train(cfg)
+    assert not (tmp_path / "checkpoints").exists()                    # no half-made run folder for latest_run_id to pick up
+
+
+def test_infer_for_a_date_beyond_the_readings_stops_with_the_reason_and_makes_no_folder(cfg, tmp_path, monkeypatch):
+    import numpy as np
+    import pandas as pd
+    import run_pipeline
+    cfg["data"]["paths"].update(snapshots_dir=str(tmp_path / "snapshots"), checkpoints_dir=str(tmp_path / "checkpoints"))
+    hourly = {"values": np.ones((100, 2)), "location_ids": np.array([1, 2]), "start": pd.Timestamp("2026-10-10 00:00")}   # readings to 2026-10-14 03:00
+    monkeypatch.setattr(run_pipeline, "_ensure_geocp", lambda *a, **k: None)
+    monkeypatch.setattr(run_pipeline, "_inference_context", lambda *a, **k: {"hourly": hourly})
+    with pytest.raises(ValueError, match="after the hourly readings.*2026-10-14 03:00"):
+        run_pipeline.infer(cfg, "run1", [], ["2026-12-01"])
+    assert not (tmp_path / "snapshots").exists()

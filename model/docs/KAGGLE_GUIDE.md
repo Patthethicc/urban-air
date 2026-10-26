@@ -50,7 +50,7 @@ Our own dev environment is Python 3.14, pandas 3, numpy 2.4, torch 2.13. Kaggle'
    ```bash
    git push
    ```
-2. **Run the tests locally**: `cd model && python -m pytest -q` should end `376 passed, 4 skipped`.
+2. **Run the tests locally**: `cd model && python -m pytest -q` should end `408 passed, 4 skipped`.
 3. **Build the upload folder** (it copies only what the pipeline reads: 984 MB, 607 files, 4 top-level folders; it leaves out the
    `combined_hourly.csv` files, which the pipeline never reads, and `QC Data/`, which only the converter needs). Run from the repo root:
    ```python
@@ -66,12 +66,16 @@ Our own dev environment is Python 3.14, pandas 3, numpy 2.4, torch 2.13. Kaggle'
        shutil.copy2(src / "Combined Dataset" / f, out / "Combined Dataset" / f)
    shutil.copytree(src / "OpenAQ", out / "OpenAQ")                       # the `raw` arm
    shutil.copytree(src / "QC Data Converted", out / "QC Data Converted")  # the `raw` arm
+   if (src / "Boundaries" / "ncr_cities.gpkg").is_file():                  # the NCR city outlines for the maps (optional: without it the maps are unclipped)
+       (out / "Boundaries").mkdir()
+       shutil.copy2(src / "Boundaries" / "ncr_cities.gpkg", out / "Boundaries" / "ncr_cities.gpkg")
    (out / "Morphology").mkdir()
    shutil.copy2(src / "Morphology" / "master_raster_v2.tif", out / "Morphology" / "master_raster_v2.tif")
    ```
 4. **Upload it.** On kaggle.com: Create, New Dataset, drag in the `urban-air-data` folder, set the title to `urban-air-data`, **Private**,
    Create. Check that you are allowed to share the Quezon City sensor data. If the upload misbehaves with so many small files, zip the
-   folder and unzip it in the notebook.
+   folder instead. Kaggle unpacks a zip as it is, so a zipped `data` folder arrives as `/kaggle/input/urban-air-data/data/Morphology/...`
+   (one folder deeper than the unzipped upload); Cell 4 finds the raster either way.
 
 ## 3. Create the notebook
 
@@ -149,25 +153,47 @@ if r.returncode:
 subprocess.run(["git", "-C", str(REPO), "remote", "set-url", "origin", "https://github.com/Patthethicc/urban-air.git"], check=True)
 ```
 
-**Cell 4: put the data next to the code** (15 s; 984 MB). The pipeline reads `../data/...` relative to `model/`.
+**Cell 4: put the data next to the code** (15 s; 984 MB). The pipeline reads `../data/...` relative to `model/`, so `Morphology/master_raster_v2.tif`
+must end up at `/kaggle/working/urban-air/data/Morphology/`. The cell looks for that raster under `DATA`, so it works whether the upload is the
+folder itself, a zip that Kaggle unpacked (a zipped `data` folder arrives one level deeper), or a zip it left packed, and it copies only the four folders the pipeline reads.
 ```python
-(REPO / "data").mkdir(exist_ok=True)
-shutil.copytree(DATA, REPO / "data", dirs_exist_ok=True)
-print(sorted(p.name for p in (REPO / "data").iterdir()))     # ['Combined Dataset', 'Morphology', 'OpenAQ', 'QC Data Converted']
+rasters = list(DATA.rglob("master_raster_v2.tif"))
+if rasters:
+    src = rasters[0].parent.parent                            # the folder that holds Morphology/, OpenAQ/, ...
+    for name in ("Combined Dataset", "Morphology", "OpenAQ", "QC Data Converted", "Boundaries"):
+        if (src / name).is_dir():                                 # Boundaries is optional: without it the maps are not clipped to the NCR
+            shutil.copytree(src / name, REPO / "data" / name, dirs_exist_ok=True)
+    print("data copied from", src)
+else:                                                         # Kaggle did not unpack an uploaded zip: its top-level `data/` folder lands in REPO
+    import zipfile
+    zips = list(DATA.rglob("*.zip"))
+    assert zips, f"no master_raster_v2.tif and no zip under {DATA}: attach the dataset in the Input panel and set DATA to the path shown there"
+    zipfile.ZipFile(zips[0]).extractall(REPO)
+    print("data unzipped from", zips[0])
+assert (REPO / "data/Morphology/master_raster_v2.tif").is_file(), f"the raster is not at {REPO}/data/Morphology: look at `ls {REPO}/data`"
+print(sorted(p.name for p in (REPO / "data").iterdir()))     # ['Boundaries', 'Combined Dataset', 'Morphology', 'OpenAQ', 'QC Data Converted'] (plus 'QC Data' if you unzipped)
 ```
+Do not copy `DATA` as a whole: a zipped `data` folder would land as `data/data/...` and everything that reads the raster fails.
 
 **Cell 5: install only what is missing, then run the test suite.** The suite is the compatibility check for Kaggle's Python and library versions.
+It needs the data in place (about 20 tests read the raster), and Kaggle's preinstalled `esda` can be older than the tested 2.10.0 (its `Moran_Local`
+then lacks the `alternative` option the spatial-bias check uses), so this cell stops without data and upgrades an old `esda`.
 ```python
 import importlib.util
+assert (REPO / "data/Morphology/master_raster_v2.tif").is_file(), "the data is not in place: run Cell 4 first (the tests and the pipeline read it)"
 need = {"skopt": "scikit-optimize", "libpysal": "libpysal", "esda": "esda", "rasterio": "rasterio", "geopandas": "geopandas",
         "shapely": "shapely", "pyproj": "pyproj", "affine": "affine", "yaml": "pyyaml", "sklearn": "scikit-learn", "pytest": "pytest"}
 missing = [pip for mod, pip in need.items() if importlib.util.find_spec(mod) is None]
 print("installing:", missing or "nothing")
 if missing:
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", *missing], check=True)
+check_esda = "import inspect; from esda.moran import Moran_Local as M; raise SystemExit(0 if 'alternative' in inspect.signature(M.__init__).parameters else 1)"
+if subprocess.run([sys.executable, "-c", check_esda]).returncode != 0:          # run in its own process: nothing is imported here
+    print("esda is too old (no two-sided LISA option): upgrading")
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "esda", "libpysal"], check=True)
 subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], cwd=MODEL)
 ```
-Expected: `376 passed, 4 skipped` after a `git clone`. If you uploaded the repo as a dataset instead (no `.git` folder), exactly one test fails,
+Expected: no failures, about `408 passed` after a `git clone` (the number of skipped tests depends on which optional libraries Kaggle has). If you uploaded the repo as a dataset instead (no `.git` folder), exactly one test fails,
 `test_dotenv_is_git_ignored_but_the_template_is_not`, because it asks git a question. That one is harmless. Any other failure means
 a library version differs: read the message before spending GPU hours.
 
@@ -341,10 +367,10 @@ runs/
 | `git clone` fails | Internet is off, or the repo is private (use the token variant) |
 | `ModuleNotFoundError: preprocessing` | the command did not run with `cwd=MODEL`; use the `run()` helper |
 | `FileNotFoundError ... locations.csv` or `master_raster_v2.tif` | Cell 4 did not copy the data, or `DATA` points at the wrong folder |
-| Cell 5 shows about 20 failures, all mentioning `master_raster_v2.tif` (`test_combine_dataset`, `test_inference_reuse`, `test_coverage`, `test_crs`) | the same cause: `/kaggle/working/urban-air/data` is missing when the tests run. Check `ls /kaggle/working/urban-air/data`, fix Cell 4, re-run Cell 5 |
+| Cell 5 shows about 20 failures, all mentioning `master_raster_v2.tif` (`test_combine_dataset`, `test_inference_reuse`, `test_coverage`, `test_crs`) | the same cause: the raster is not at `/kaggle/working/urban-air/data/Morphology/`. Most often the upload was a zipped `data` folder and was copied one level too deep (`data/data/Morphology`). Use the Cell 4 above, which finds the raster itself; check with `ls /kaggle/working/urban-air/data` |
 | `esda ... is too old for the two-sided LISA p-values` (or `Moran_Local ... unexpected keyword argument 'alternative'` in the tests) | Kaggle's preinstalled esda is older than the tested 2.10.0: `pip install -U esda libpysal`, restart the session, re-run Cells 2 to 5 |
 | `CARTO basemap tiles need a free API key` on Kaggle | `CARTO_API_KEY` is not in the environment (`model/.env` is not cloned). Re-run the Secrets lines of Cell 11 (they are lost on a restart); check the secret is attached to this notebook and spelled exactly `CARTO_API_KEY`; web tiles also need Internet on |
-| `test_the_real_xyzservices_carto_provider_is_recognised_and_keyed` fails | Kaggle's xyzservices is older and its CARTO template has no key placeholder; the code adds `?key=` itself, so this does not affect results |
+| `test_the_real_xyzservices_carto_provider_is_recognised_and_keyed` is skipped | Kaggle's xyzservices is older and its CARTO template has no key placeholder; the code adds `?key=` itself (`test_a_carto_template_without_a_key_placeholder_gets_the_key_appended`), so results are not affected |
 | `ModuleNotFoundError: skopt` (or `libpysal`, `esda`) | Cell 5 was skipped; `tune` needs scikit-optimize, `report` needs libpysal and esda |
 | `CUDA out of memory` in `train` | lower `train.batch_size`; in `infer` lower `inference.chunk_cells` (default 1024) |
 | `TIMEOUT in stage ... no progress for 600 s` (exit code 124) | a real hang was detected; see `runtime:` in `configs/train.yaml`; re-run that stage |
