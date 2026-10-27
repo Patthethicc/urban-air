@@ -203,3 +203,84 @@ def test_the_timer_line_projects_the_finish_from_the_trials_and_the_evaluation_f
 def test_a_search_outside_a_tuning_run_prints_no_timer(capsys):
     gp_search(lambda hp: (hp["learning_rate"], {}), LR_SPACE, _tune())
     assert "timer:" not in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------------------ resuming an interrupted search
+def _log_of_two_trials(tmp_path, seconds=3600):
+    path = tmp_path / "search_final.json"
+    gp_search(lambda hp: (hp["learning_rate"] * 100, {}), LR_SPACE, _tune(), log_path=path, tag="[final]")     # a finished search of 3 trials
+    log = json.loads(path.read_text(encoding="utf-8"))
+    log["trials"] = [{**t, "seconds": seconds} for t in log["trials"][:2]]                                # ... cut short after trial 2
+    path.write_text(json.dumps(log), encoding="utf-8")
+    return path, log["trials"]
+
+
+def test_a_resumed_search_reuses_the_finished_trials_runs_only_the_missing_ones_and_numbers_on(tmp_path, capsys, monkeypatch):
+    import skopt
+    path, kept = _log_of_two_trials(tmp_path)
+    calls, spy = [], {}
+    real = skopt.gp_minimize
+
+    def spy_minimize(func, dims, **kw):
+        spy.update(kw)
+        return real(func, dims, **kw)
+
+    monkeypatch.setattr(skopt, "gp_minimize", spy_minimize)
+
+    def objective(hp, label=""):
+        calls.append(label)
+        return hp["learning_rate"] * 100, {}
+
+    capsys.readouterr()
+    res = gp_search(objective, LR_SPACE, _tune(), log_path=path, tag="[final]", resume=True)
+    out = capsys.readouterr().out
+    assert calls == ["[final] trial 3/3"]                                              # only the missing trial ran, numbered on
+    assert "resuming [final]: 2 finished trials reused" in out and "1 left to run" in out
+    assert [t["trial"] for t in res["trials"]] == [1, 2, 3] and res["trials"][:2] == kept
+    assert res["best_loss"] == min(t["loss"] for t in res["trials"])
+    assert spy["n_calls"] == 1 and spy["n_initial_points"] == 0                          # nothing owed: the surrogate starts from the 2 reused trials
+    assert spy["x0"] == [[t["hyperparameters"]["learning_rate"]] for t in kept] and spy["y0"] == [t["loss"] for t in kept]
+    assert len(json.loads(path.read_text(encoding="utf-8"))["trials"]) == 3            # the log is completed in place
+
+
+def test_a_search_that_was_already_finished_runs_nothing_and_a_missing_log_starts_fresh(tmp_path):
+    path, _ = _log_of_two_trials(tmp_path)
+    done = gp_search(lambda hp: (hp["learning_rate"], {}), LR_SPACE, _tune(n_calls=2), log_path=path, resume=True)
+    assert len(done["trials"]) == 2
+    seen = []
+    fresh = gp_search(lambda hp: seen.append(1) or (hp["learning_rate"], {}), LR_SPACE, _tune(), log_path=tmp_path / "none.json", resume=True)
+    assert len(seen) == 3 and len(fresh["trials"]) == 3
+
+
+def test_owed_random_starts_are_still_run_after_an_early_interruption(tmp_path, monkeypatch):
+    import skopt
+    path, kept = _log_of_two_trials(tmp_path)
+    log = json.loads(path.read_text(encoding="utf-8"))
+    log["trials"] = log["trials"][:1]                                                  # stopped after trial 1 of 3 (n_initial_points = 2)
+    path.write_text(json.dumps(log), encoding="utf-8")
+    spy, real = {}, skopt.gp_minimize
+    monkeypatch.setattr(skopt, "gp_minimize", lambda f, d, **kw: (spy.update(kw), real(f, d, **kw))[1])
+    gp_search(lambda hp: (hp["learning_rate"], {}), LR_SPACE, _tune(), log_path=path, resume=True)
+    assert spy["n_calls"] == 2 and spy["n_initial_points"] == 1                          # one more random start, then the surrogate
+
+
+def test_the_timer_of_a_resumed_run_counts_the_reused_trials(tmp_path, capsys):
+    path, _ = _log_of_two_trials(tmp_path, seconds=3600)                               # two trials of an hour each were done before
+    tuning.start_run_clock(3, 0)
+    capsys.readouterr()
+    gp_search(lambda hp: (hp["learning_rate"], {}), LR_SPACE, _tune(), log_path=path, resume=True)
+    timer = [x for x in capsys.readouterr().out.splitlines() if x.startswith("  timer: ")]
+    assert len(timer) == 1 and timer[0].startswith("  timer: elapsed 2.0 h, 3/3 trials") and timer[0].endswith("all trials done")
+
+
+def test_resume_needs_the_final_search_only_and_an_existing_run_folder(small_cfg, tmp_path):
+    from config_parser import validate_for_tuning
+    cfg = small_cfg
+    cfg["tune"].update(resume_from=str(tmp_path / "20260101_000000"), nested_evaluation=True)
+    with pytest.raises(ValueError, match="nested_evaluation: false"):
+        validate_for_tuning(cfg)
+    cfg["tune"]["nested_evaluation"] = False
+    cfg["data"]["paths"].update(processed_dir=str(tmp_path / "processed"), tuning_dir=str(tmp_path / "tuning"))
+    with pytest.raises(FileNotFoundError, match="search_final.json"):
+        nested_tuning(cfg)
+    assert not (tmp_path / "tuning").exists()

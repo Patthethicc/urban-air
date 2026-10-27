@@ -24,7 +24,7 @@ def test_flatten_option_matches_the_patch_size(cfg):
     d = cfg["derived"]
     out = model(torch.randn(3, d["C"], 4, 4), torch.randn(3, d["T"], d["F"]))
     assert out.shape == (3, 1) and torch.isfinite(out).all()
-    assert model.spatial.project[0].in_features == 128 * 4 * 4                      # the whole map is kept
+    assert model.spatial.project[0].in_features == cfg["model"]["spatial_cnn"]["conv_channels"][-1] * 4 * 4     # the whole map is kept
 
 
 def test_flatten_rejects_a_different_patch_size(cfg):

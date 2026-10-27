@@ -25,7 +25,9 @@ def grad_cam(model, patches: np.ndarray, temporal: np.ndarray, device: str = "cp
 
     handle = model.spatial.conv[-1].register_forward_hook(keep_activation)
     try:
-        with torch.enable_grad():
+        # cuDNN's LSTM refuses to backpropagate in eval mode ("cudnn RNN backward can only be called in training mode"), and eval mode
+        # is needed (dropout off). Switching cuDNN off for this pass uses PyTorch's own LSTM kernels: same maths, a little slower.
+        with torch.enable_grad(), torch.backends.cudnn.flags(enabled=False):
             model.zero_grad()
             pred = model(torch.from_numpy(np.ascontiguousarray(patches)).to(device),
                          torch.from_numpy(np.ascontiguousarray(temporal)).to(device))

@@ -5,8 +5,9 @@ spatial_cnn:
                         # how much R2 the morphology patches add
   in_channels: null     # = number of Master GeoTIFF bands
   patch_px: null        # = patch side in pixels (only used by feature_map: flatten)
-  conv_channels: [32, 64, 128]
-  kernel_size: 3        # keep odd: padding = kernel_size // 2 only preserves size for odd kernels
+  conv_channels: [42, 84, 168]   # tuned: 42 filters in the first layer, doubled in each deeper layer (was [32, 64, 128])
+  kernel_size: 7        # tuned (was 3). Keep odd: padding = kernel_size // 2 only preserves size for odd kernels. A 7 x 7 kernel costs several times
+                        # more per batch than 3 x 3 on a CPU (about 5x with these channels); on a GPU it is cheap.
   feature_map: pool     # pool    = average-pool the feature map to 1x1, then a linear layer -> embed_dim
                         # flatten = flatten the whole feature map (channels * px * px), then a linear layer
                         #           (literal reading of Training.txt; large for 32x32 patches)
@@ -14,9 +15,9 @@ spatial_cnn:
   dropout: 0.1
 temporal_lstm:
   input_size: null      # = F, features per timestep (see data.yaml temporal)
-  hidden_size: 64
+  hidden_size: 114      # tuned (was 64)
   num_layers: 2
-  dropout: 0.1          # recurrent dropout: nn.LSTM applies it BETWEEN stacked layers, so keep num_layers >= 2
+  dropout: 0.036067488976193836   # tuned (was 0.1). Recurrent dropout: nn.LSTM applies it BETWEEN stacked layers, so keep num_layers >= 2
 fusion_head:
   hidden_dims: [64, 32]
   dropout: 0.1

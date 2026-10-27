@@ -50,7 +50,7 @@ Our own dev environment is Python 3.14, pandas 3, numpy 2.4, torch 2.13. Kaggle'
    ```bash
    git push
    ```
-2. **Run the tests locally**: `cd model && python -m pytest -q` should end `408 passed, 4 skipped`.
+2. **Run the tests locally**: `cd model && python -m pytest -q` should end `416 passed, 4 skipped`.
 3. **Build the upload folder** (it copies only what the pipeline reads: 984 MB, 607 files, 4 top-level folders; it leaves out the
    `combined_hourly.csv` files, which the pipeline never reads, and `QC Data/`, which only the converter needs). Run from the repo root:
    ```python
@@ -193,7 +193,7 @@ if subprocess.run([sys.executable, "-c", check_esda]).returncode != 0:          
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "esda", "libpysal"], check=True)
 subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], cwd=MODEL)
 ```
-Expected: no failures, about `408 passed` after a `git clone` (the number of skipped tests depends on which optional libraries Kaggle has). If you uploaded the repo as a dataset instead (no `.git` folder), exactly one test fails,
+Expected: no failures, about `416 passed` after a `git clone` (the number of skipped tests depends on which optional libraries Kaggle has). If you uploaded the repo as a dataset instead (no `.git` folder), exactly one test fails,
 `test_dotenv_is_git_ignored_but_the_template_is_not`, because it asks git a question. That one is harmless. Any other failure means
 a library version differs: read the message before spending GPU hours.
 

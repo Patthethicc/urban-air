@@ -10,7 +10,7 @@ def test_run_info_records_the_hyperparameters_and_updates_in_place(cfg, tmp_path
     save_run_info(tmp_path, info)
 
     loaded = load_run_info(tmp_path)
-    assert loaded["hyperparameters"]["model"]["temporal_lstm"]["hidden_size"] == 64
+    assert loaded["hyperparameters"]["model"]["temporal_lstm"]["hidden_size"] == cfg["model"]["temporal_lstm"]["hidden_size"]
     assert loaded["parameters"]["total"] == model.parameter_counts()["total"]
     assert "DualBranchNet" in loaded["architecture"]
 

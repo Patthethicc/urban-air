@@ -1,0 +1,26 @@
+{
+  "hyperparameters": {
+    "learning_rate": 0.000353034441942874,
+    "batch_size": 447,
+    "cnn_kernel_size": 7,
+    "cnn_filters": 42,
+    "lstm_hidden_size": 114,
+    "recurrent_dropout": 0.036067488976193836,
+    "epochs": 6
+  },
+  "inner_cv_loss": 0.34354301042460483,
+  "epochs_mode": "early_stopping",
+  "epochs_note": "epochs = mean best epoch of the winning trial's inner folds (early stopping)",
+  "use_with": "python run_pipeline.py --stage train --tuned",
+  "as_overrides": [
+    "train.optimizer.lr=0.000353034441942874",
+    "train.batch_size=447",
+    "train.epochs=6",
+    "train.final_epochs=6",
+    "model.spatial_cnn.kernel_size=7",
+    "model.spatial_cnn.conv_channels=[42, 84, 168]",
+    "model.temporal_lstm.hidden_size=114",
+    "model.temporal_lstm.dropout=0.036067488976193836"
+  ],
+  "note": "--tuned applies these to ONE command; a plain `train` uses configs/*.yaml. To make them the default, copy them into configs/train.yaml and configs/model.yaml, or pass them as --override."
+}

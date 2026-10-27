@@ -3,6 +3,8 @@
 outer_folds: 3             # held-out stations that estimate how well the whole tuning procedure generalises
 inner_folds: 3             # inside each outer-training set: guide the search
 nested_evaluation: true    # false = skip the outer loop, only run the final search (much cheaper)
+resume_from: null          # an interrupted run's folder (tuning/<timestamp>): its finished trials (search_final.json) are reused and only the
+                           # missing ones run, e.g. after a power cut. Needs nested_evaluation: false and the same settings and data as that run
 n_calls: 12                # evaluations of the objective per search (every one trains inner_folds models)
 n_initial_points: 5        # random points before the surrogate takes over
 acq_func: EI               # EI | PI | LCB | gp_hedge

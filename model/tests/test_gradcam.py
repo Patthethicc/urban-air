@@ -55,6 +55,18 @@ def test_real_model_cam_is_normalised_deterministic_and_leaves_the_model_untouch
     assert len(model.spatial.conv[-1]._forward_hooks) == 0                                   # hook removed
 
 
+def test_cudnn_is_off_during_the_pass_and_restored_after(cfg):
+    """cuDNN's LSTM cannot backpropagate in eval mode (the Kaggle GPU error), so the pass must run with cuDNN disabled."""
+    model = DualBranchNet(cfg["model"])
+    d = cfg["derived"]
+    seen = []
+    handle = model.spatial.conv[-1].register_forward_hook(lambda *_: seen.append(torch.backends.cudnn.enabled))
+    before = torch.backends.cudnn.enabled
+    grad_cam(model, np.zeros((2, d["C"], 4, 4), np.float32), np.zeros((2, d["T"], d["F"]), np.float32))
+    handle.remove()
+    assert seen == [False] and torch.backends.cudnn.enabled == before
+
+
 def test_the_prediction_returned_is_the_plain_forward_pass(cfg):
     model = DualBranchNet(cfg["model"]).eval()
     d = cfg["derived"]

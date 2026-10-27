@@ -140,25 +140,27 @@ def apply_tuned(cfg: dict, ref: str) -> dict:
 
 # ------------------------------------------------------------------ the search
 _PACE_PENDING = [True]                   # the "at this pace ..." projection is printed once per tuning run
-_RUN = {"started": None, "total_trials": 0, "done": 0, "trial_s": 0.0, "evals_total": 0, "evals_done": 0, "eval_s": 0.0}
+_RUN = {"started": None, "total_trials": 0, "done": 0, "trial_s": 0.0, "evals_total": 0, "evals_done": 0, "eval_s": 0.0, "before_s": 0.0}
 
 
 def start_run_clock(total_trials: int, evals: int) -> None:
     """Start the clock of a whole tuning run: `total_trials` over all searches and `evals` evaluation fits (nested tuning)."""
-    _RUN.update(started=time.time(), total_trials=int(total_trials), done=0, trial_s=0.0, evals_total=int(evals), evals_done=0, eval_s=0.0)
+    _RUN.update(started=time.time(), total_trials=int(total_trials), done=0, trial_s=0.0, evals_total=int(evals), evals_done=0, eval_s=0.0,
+                before_s=0.0)
 
 
 def eta_line(run: dict, now: float | None = None) -> str:
     """'elapsed 1.2 h, 5/48 trials, about 9.1 h left, expected finish Tue 27 Oct 16:40'. The estimate is the trials still to run at the
     average trial time so far, plus the evaluation fits still to run at the average evaluation time (not counted until one has been
-    timed). It is a projection: later searches can be faster or slower than the first ones."""
+    timed). It is a projection: later searches can be faster or slower than the first ones. After a resume, `elapsed` includes the
+    compute time of the trials that were reused."""
     now = time.time() if now is None else now
     done, total = run["done"], run["total_trials"]
     evals_left = run["evals_total"] - run["evals_done"]
     avg_trial = run["trial_s"] / done if done else 0.0
     avg_eval = run["eval_s"] / run["evals_done"] if run["evals_done"] else 0.0
     left = max(total - done, 0) * avg_trial + evals_left * avg_eval
-    text = f"elapsed {format_duration(now - run['started'])}, {done}/{total} trials"
+    text = f"elapsed {format_duration(now - run['started'] + run.get('before_s', 0.0))}, {done}/{total} trials"
     if total - done <= 0 and evals_left <= 0:
         return text + ", all trials done"
     finish = datetime.fromtimestamp(now + left)
@@ -167,13 +169,16 @@ def eta_line(run: dict, now: float | None = None) -> str:
 
 
 def gp_search(objective, space_cfg: dict, tune_cfg: dict, log_path: Path | None = None, tag: str = "",
-              searches: int = 1) -> dict:
+              searches: int = 1, resume: bool = False) -> dict:
     """Run skopt.gp_minimize on objective(hp) -> (loss, details). Every trial is logged (and written to
     log_path as it happens, so an interrupted search keeps what it learned).
 
     An objective that takes a `label` argument is told which trial it runs ("[outer 0] trial 3/12"), so its progress
     lines can say where they are. `searches` = how many searches the whole tuning run has (for the one-off projection
-    printed after the very first trial)."""
+    printed after the very first trial).
+
+    `resume`: when `log_path` already holds the trials of an interrupted search, they are reused (the surrogate is told their results) and only
+    the missing ones run, numbered on from where it stopped."""
     from skopt import gp_minimize
     from skopt.utils import use_named_args
 
@@ -181,6 +186,14 @@ def gp_search(objective, space_cfg: dict, tune_cfg: dict, log_path: Path | None 
     n_calls = int(tune_cfg["n_calls"])
     takes_label = "label" in inspect.signature(objective).parameters
     trials: list[dict] = []
+    if resume and log_path is not None and Path(log_path).is_file():
+        trials = json.loads(Path(log_path).read_text(encoding="utf-8"))["trials"][:n_calls]
+        if _RUN["started"] is not None:                       # the reused trials count for the timer and the finish projection
+            _RUN["done"] += len(trials)
+            _RUN["trial_s"] += sum(t["seconds"] for t in trials)
+            _RUN["before_s"] += sum(t["seconds"] for t in trials)
+        print(f"  resuming {tag or 'the search'}: {len(trials)} finished trial{'s' if len(trials) != 1 else ''} reused "
+              f"(best loss {min((t['loss'] for t in trials), default=float('nan')):.4f}), {n_calls - len(trials)} left to run", flush=True)
 
     @use_named_args(dims)
     def wrapped(**kw):
@@ -210,9 +223,12 @@ def gp_search(objective, space_cfg: dict, tune_cfg: dict, log_path: Path | None 
             write_json(log_path, {"tag": tag, "trials": trials})
         return loss
 
-    gp_minimize(wrapped, dims, n_calls=n_calls,
-                n_initial_points=min(int(tune_cfg["n_initial_points"]), n_calls),
-                acq_func=tune_cfg["acq_func"], random_state=int(tune_cfg["random_state"]))
+    reused = len(trials)
+    if n_calls - reused > 0:
+        known = dict(x0=[[t["hyperparameters"][d.name] for d in dims] for t in trials], y0=[t["loss"] for t in trials]) if reused else {}
+        gp_minimize(wrapped, dims, n_calls=n_calls - reused,
+                    n_initial_points=max(0, min(int(tune_cfg["n_initial_points"]), n_calls) - reused),     # random starts still owed
+                    acq_func=tune_cfg["acq_func"], random_state=int(tune_cfg["random_state"]), **known)
     best = min(trials, key=lambda t: t["loss"])
     hp = dict(best["hyperparameters"])
     if "suggested_epochs" in best:
@@ -265,7 +281,13 @@ def nested_tuning(cfg: dict) -> Path:
     from config_parser import validate_for_tuning
     validate_for_tuning(cfg)
     t, processed = cfg["tune"], cfg["data"]["paths"]["processed_dir"]
-    tune_dir = Path(cfg["data"]["paths"]["tuning_dir"]) / datetime.now().strftime("%Y%m%d_%H%M%S")
+    resume = t.get("resume_from")
+    if resume:
+        tune_dir = Path(resume)
+        if not (tune_dir / "search_final.json").is_file():
+            raise FileNotFoundError(f"tune.resume_from: {tune_dir / 'search_final.json'} not found (give the tuning/<timestamp> folder of the interrupted run)")
+    else:
+        tune_dir = Path(cfg["data"]["paths"]["tuning_dir"]) / datetime.now().strftime("%Y%m%d_%H%M%S")
     tune_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = AirQualityDataset(processed, "train")
@@ -319,7 +341,7 @@ def nested_tuning(cfg: dict) -> Path:
 
     print(f"--- final search over all training stations (search {searches}/{searches})", flush=True)
     final = gp_search(make_objective(cfg, dataset, spatial_cv_folds(meta, t["inner_folds"], **fold_settings(cfg)), stride, seed, recomputer),
-                      effective_space(t), t, tune_dir / "search_final.json", tag="[final]", searches=searches)
+                      effective_space(t), t, tune_dir / "search_final.json", tag="[final]", searches=searches, resume=bool(resume))
     write_json(tune_dir / "best_hyperparameters.json",
                {"hyperparameters": final["best_hyperparameters"], "inner_cv_loss": final["best_loss"],
                 "epochs_mode": "searched" if t["search_epochs"] else "early_stopping",

@@ -137,6 +137,9 @@ def validate_for_tuning(cfg: dict) -> None:
         cnn = [k for k in cfg["tune"]["space"] if k.startswith("cnn_")]
         if cnn:
             raise ValueError(f"spatial_cnn.enabled is false but tune.space searches CNN parameters {cnn}")
+    if cfg["tune"].get("resume_from") and cfg["tune"].get("nested_evaluation"):
+        raise ValueError("tune.resume_from continues the final search of an interrupted run, so it needs tune.nested_evaluation: false "
+                         "(the outer evaluations are not saved between runs)")
 
 
 def resolve_path(value: str) -> str:
