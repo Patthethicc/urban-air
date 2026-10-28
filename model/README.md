@@ -395,8 +395,11 @@ gives (32 × 32). It writes four figures into `explain/<D_HHMM>/`:
 | `gradcam_hot_cells.png`, `gradcam_cold_cells.png` | one row per numbered cell: every morphology band (with units) with the attended region outlined in orange, a 100 m scale, and the Grad-CAM map with its colourbar |
 | `gradcam_band_profile.png` | hot against cold: for each band, how much higher or lower the attended pixels are than the rest of the patch, averaged over the explained cells |
 | `morphology_sheet.png` | the five raster bands mapped over the NCR in quantile classes with range legends (what the CNN branch gets to see), with the explained cells marked |
+| `feature_groups/` | the hot and cold cells of the **high** and the **low** end of each band over the whole NCR (below): `map_<band>_<level>.png`, `gradcam_<band>_<level>_<high\|low>.png`, `feature_group_comparison.png`, `feature_group_summary.csv`, `feature_group_cells.csv`, `feature_group_attention.csv`, `feature_group_cities.csv` |
 
 **Hot and cold** are the highest- and lowest-predicted cells of that hour (`output.explain.top_n` / `bottom_n`, six each). They are ranked inside the NCR and no two may be closer than `output.explain.min_separation_m` (1,000 m), so they are different places and not one hotspot's neighbours. **Grad-CAM** shows which pixels of a cell's 320 m patch drove its prediction; the orange line encloses the top 20 % of that attention (`output.explain.attention_quantile`). Attention shows where the model looked, not why PM2.5 is high: read it next to the morphology sheet. Note that with a coarse `stride_px` the hot and cold cells are chosen from that coarse map.
+
+**Feature groups** (`output.explain.feature_groups`, on by default, written to `explain/<hour>/feature_groups/`). Besides the plain hot and cold cells, `explain` asks the same question for the high and the low end of every morphology band. A cell is in the *high* group of a band when the **raster** value of its 320 m patch (the patch mean, NoData ignored) is at or above an NCR percentile, in the *low* group when at or below the low percentile; only inside a group does the prediction pick the **hot** cells (highest predicted PM2.5 of that hour) and **cold** cells (lowest), spread by `min_separation_m`. Two levels are on by default: `zone` (top and bottom 10 %) and `extreme` (top and bottom 0.1 %); add more under `levels`. Per band and level you get an NCR map of the two ends with the numbered picks (circles = high end, diamonds = low end), a Grad-CAM close-up sheet for each end, and across bands `feature_group_comparison.png` (mean predicted PM2.5 in the high against the low end) and `feature_group_cities.csv` (per city: share of its cells in each end and the mean prediction there). This is an **association**: it shows what the model predicts and attends to where a feature is high or low, not what would happen if the feature were changed. When many cells share the limit value (e.g. a band that is 0 over water) a group is larger than its percentile says; `feature_group_summary.csv` gives the true size.
 
 ### 2.7 Tune hyperparameters, then train with them
 
@@ -871,7 +874,7 @@ snapshots/<run_id>/
     surface/<YYYYMMDD>/   prediction_volume.tif  lower_volume.tif  upper_volume.tif  width_volume.tif
                           prediction_daily_mean.tif  output_summary.json  maps/*.png
     explain/<YYYYMMDD_HHMM>/   gradcam_map.png  gradcam_hot_cells.png  gradcam_cold_cells.png  gradcam_band_profile.png  morphology_sheet.png
-                               gradcam_attention.csv  gradcam_summary.json
+                               gradcam_attention.csv  gradcam_summary.json  feature_groups/  (maps, close-ups, comparison chart, csv)
 ```
 
 ### Visualizations at a glance
@@ -893,6 +896,7 @@ snapshots/<run_id>/
 | `gradcam_map.png` | `explain` | the explained hot and cold cells, numbered, on the predicted PM2.5 map |
 | `gradcam_band_profile.png` | `explain` | per band, what the attended pixels look like for hot against cold cells |
 | `morphology_sheet.png` | `explain` | the five morphology bands mapped over the NCR, with the explained cells marked |
+| `feature_groups/*` | `explain` | hot and cold cells of the high and low end of each band over the NCR: maps, Grad-CAM close-ups, a high-against-low chart, per-city table |
 | `maps/daily_mean.png` | `infer` | the 24-hour mean on the same scale (optional outline at the 50 µg/m³ guideline, off by default) |
 | `gradcam_hot_cells.png`, `gradcam_cold_cells.png` | `explain` | for the highest / lowest predicted cells: every morphology band with the attended region outlined, and the Grad-CAM map |
 

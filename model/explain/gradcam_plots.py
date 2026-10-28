@@ -31,10 +31,10 @@ NOTE_PROFILE = ("Bars: mean over the explained cells of (band value on the atten
 
 def plot_cam_overlays(raw_patches: np.ndarray, cam: np.ndarray, band_names: list[str], titles: list[str],
                       path: str, quantile: float = 0.8, dpi: int = 150, *, cfg: dict | None = None, px_m: float = 10.0,
-                      caption: str | None = None, heading: str | None = None) -> str:
+                      caption: str | None = None, heading: str | None = None, notes: tuple | None = None) -> str:
     """One row per cell: every morphology band (grey, with units in the title) with the attended region outlined in orange, a 100 m
     scale tick, and the Grad-CAM map with its colourbar in the last column. With `cfg`, notes explaining the figure and a caption
-    are added at the bottom."""
+    are added at the bottom (`notes` replaces the default hot/cold note, for figures with another selection rule)."""
     n, bands = len(cam), raw_patches.shape[1]
     fig, axes = plt.subplots(n, bands + 1, figsize=(2.3 * (bands + 1) + 0.7, 2.3 * n + 1.1), facecolor=SURFACE, squeeze=False)
     image = None
@@ -65,7 +65,7 @@ def plot_cam_overlays(raw_patches: np.ndarray, cam: np.ndarray, band_names: list
         axes[i, 0].set_ylabel(titles[i], color=INK2, fontsize=7, rotation=0, ha="right", va="center", labelpad=6)
     if heading:
         fig.suptitle(heading, color=INK, fontsize=10, x=0.02, ha="left")
-    foot = cartography.footer(fig, cfg, caption, (NOTE_HOT_COLD, NOTE_CAM, NOTE_ORANGE)) if cfg is not None else 0.0
+    foot = cartography.footer(fig, cfg, caption, (*(notes if notes is not None else (NOTE_HOT_COLD,)), NOTE_CAM, NOTE_ORANGE)) if cfg is not None else 0.0
     fig.tight_layout(rect=(0, foot, 0.94, 0.95 if heading else 1))
     if image is not None:
         top, bottom = axes[0, -1].get_position().y1, axes[-1, -1].get_position().y0

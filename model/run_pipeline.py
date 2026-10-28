@@ -562,6 +562,7 @@ def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
     import rasterio
     from rasterio.transform import rowcol, xy as cell_xy_of
 
+    from explain import feature_groups
     from explain.gradcam import attention_profile, grad_cam, spread_selection
     from explain.gradcam_map import plot_gradcam_map
     from explain.gradcam_plots import plot_band_profile, plot_cam_overlays
@@ -622,18 +623,25 @@ def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
     cells = []
     rows, summary = [], {"timestamp": str(ts), "patch_px": px, "attention_quantile": ex["attention_quantile"], "groups": {},
                          "ranked_inside_ncr": boundary is not None}
-    for group, flat in groups.items():
-        r_out, c_out = np.unravel_index(flat, pred_map.shape)
-        xs, ys = cell_xy_of(vol_transform, r_out, c_out, offset="center")
+    def explain_cells(xs, ys):
+        """Grad-CAM for the cells at (xs, ys): (raw patches, cam, predictions, mask of the cells kept: those with a full history)."""
+        xs, ys = np.asarray(xs, dtype="float64"), np.asarray(ys, dtype="float64")
         r_pix, c_pix = (np.asarray(v) for v in rowcol(ctx["transform"], xs, ys))
         raw = gather_patches(ctx["padded"], r_pix, c_pix, px)
         feats = cell_temporal_features(ctx["hourly"]["values"], ctx["hourly"]["location_ids"], ref_ids, ref_xy,
                                        np.column_stack([xs, ys]), t_idx, ts, cfg)
         keep = ~np.isnan(feats).any(axis=(1, 2))
-        raw, feats, xs, ys = raw[keep], feats[keep], np.asarray(xs)[keep], np.asarray(ys)[keep]
+        raw, feats = raw[keep], feats[keep]
         cam, p_scaled = grad_cam(ctx["model"], ctx["scalers"].transform_patches(raw),
                                  ctx["scalers"].transform_temporal(feats), ctx["device"])
-        pred = ctx["scalers"].inverse_y(p_scaled).ravel()
+        return raw, cam, ctx["scalers"].inverse_y(p_scaled).ravel(), keep
+
+    for group, flat in groups.items():
+        r_out, c_out = np.unravel_index(flat, pred_map.shape)
+        xs, ys = cell_xy_of(vol_transform, r_out, c_out, offset="center")
+        xs, ys = np.asarray(xs, dtype="float64"), np.asarray(ys, dtype="float64")
+        raw, cam, pred, keep = explain_cells(xs, ys)
+        xs, ys = xs[keep], ys[keep]
         prof = attention_profile(raw, cam, names, ex["attention_quantile"])
         for r in prof:
             rows.append({"group": group, "cell_number": r["patch"] + 1, "x": float(xs[r["patch"]]), "y": float(ys[r["patch"]]),
@@ -657,6 +665,12 @@ def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
                      f"PM2.5 prediction, {ts:%Y-%m-%d %H:%M}", stations=ctx["stations"], caption=caption, dpi=dpi)
     plot_morphology_sheet(_paths(cfg)["master_raster"], cfg, cells, str(out_dir / "morphology_sheet.png"), names,
                           stations=ctx["stations"], caption=caption, dpi=dpi)
+    fg = feature_groups.settings(cfg)
+    if fg["enabled"]:
+        summary["feature_groups"] = feature_groups.run(
+            cfg, pred_map=pred_map, transform=vol_transform, ok=ok, names=names, raster_path=_paths(cfg)["master_raster"],
+            explain_cells=explain_cells, out_dir=out_dir, ts=ts, caption=caption, stations=ctx["stations"], dpi=dpi,
+            px=px, res=res)
     summary["hot_cold"] = ("hot = the highest predicted PM2.5 cells of this hour, cold = the lowest "
                            "(inside the NCR when a boundary is set); Grad-CAM shows which pixels of each cell's patch drove its prediction")
     summary["reading"] = ("std_units > 0: the attended pixels carry higher values of that band than the rest of the "

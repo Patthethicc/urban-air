@@ -69,3 +69,13 @@ explain:                  # Grad-CAM on the CNN branch (--stage explain)
   min_separation_m: 1000  # no two explained cells closer than this, so the 6 hottest are 6 places and not one hotspot's neighbours
                           # (0 = just the top and bottom cells)
   attention_quantile: 0.8 # "attended" pixels = the top 20 % of a patch's Grad-CAM values
+  feature_groups:         # also in --stage explain: the hot and cold cells of the HIGH and the LOW end of each morphology band over the whole NCR
+    enabled: true         # (outputs in explain/<hour>/feature_groups/). The ends are set by the RASTER (the 320 m patch mean of the band),
+                          # the prediction only picks hot and cold inside an end. Describes the model's predictions, not a what-if effect.
+    levels:               # each level = a high limit and a low limit, as percentiles of the NCR cells; make as many as you like
+      - {name: zone, high_percentile: 90, low_percentile: 10}         # the top and the bottom 10 % of the NCR
+      - {name: extreme, high_percentile: 99.9, low_percentile: 0.1}   # the very highest and lowest values
+    top_n: null           # hot cells per end; null = explain.top_n
+    bottom_n: null        # cold cells per end; null = explain.bottom_n
+    min_separation_m: null  # null = explain.min_separation_m
+    feature_step_m: 50    # the raster is averaged to cells of this size to get every cell's patch mean (the 10 m grid is never held whole)
