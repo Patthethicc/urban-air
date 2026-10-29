@@ -412,7 +412,7 @@ def main():
     elif args.stage == 'split':
         stage_split()
     elif args.stage == 'patch':
-        stage_patch()
+        stage_patch(args.force_patch)
     elif args.stage == 'ablation':
         stage_ablation(args.n_trials, arms=args.arms or ('A', 'B', 'C'), smoke=args.smoke,
                        row_stride=args.row_stride, untuned=args.untuned,
@@ -440,7 +440,7 @@ def main():
         # Split and patch statistics are cheap and idempotent, so they always run first; then the
         # experiment, the test read, intervals, the artifact, the maps and the figures.
         stage_split()
-        stage_patch()
+        stage_patch(args.force_patch)
         stage_report()
         stage_ablation(args.n_trials, arms=args.arms or ('A', 'B', 'C'), smoke=args.smoke)
         stage_test(args.test_arm)
