@@ -489,6 +489,54 @@ fetch fails the maps render on plain axes instead of breaking.
 `contextily` is still preferred when present. Set `basemap.configure(web_tiles=False)` for a fully offline
 render.
 
+## The 10 m surfaces, in the CNN-LSTM's cartography
+
+The paper places the two branches side by side, so the XGBoost surfaces are drawn with the same furniture
+as the CNN-LSTM figures (`model/output/cartography.py` in this repository): a light basemap, the NCR
+boundary clip, city outlines and names, monitoring stations as white dots, kilometre axes, a two-tone
+scale bar, a north arrow, one viridis colourbar and a "No data" swatch.
+
+```bash
+cd XGBoost
+
+# 2x2 panel per date, scaled like the CNN-LSTM map of the same date
+python maps/cnn_maps.py --days 20250830 --vmin 13 --vmax 47
+python maps/cnn_maps.py --days 20250723 --vmin 10.4 --vmax 19.8
+
+# one map per hour, at their zoom
+python maps/cnn_maps.py --days 20250830 --single --vmin 13 --vmax 47
+```
+
+Two things have to exist before the first render:
+
+| Needed | How to get it |
+|---|---|
+| `data/ncr_cities.gpkg` | `python -m preprocessing.boundaries` — fetches GADM 4.1, keeps the 17 NCR cities, 558 km². Not redistributed, so it stays out of git |
+| basemap tiles | fetched once into `data/basemap_cache/` (Esri, no API key). Set `XGB_TILE_URL` to use another provider, e.g. CartoDB Positron with a free key |
+
+### Filling the gaps to the boundary
+
+By default the 10 m inference paints only pixels with complete morphology and a stand-in history — about
+67% of the grid. `--fill` extends that to the whole study area, and the three steps are worth knowing
+because they are a methodological choice, not a rendering trick:
+
+1. **nearest valid morphology** — a pixel with no morphology (masked water, the DSM fringe) takes the
+   features of its nearest valid pixel;
+2. **edge-padded grid** — the stack is extended to the NCR bounding box (330 rows north, 548 south of the
+   raster), so land beyond the raster still gets a prediction;
+3. **in-paint and clamp** — any pixel still unpredicted takes the nearest predicted value, and every
+   extrapolated pixel is limited to the 0.5–99.5 percentile range of the fully measured cells, so an edge
+   artefact cannot invent a 290 µg/m³ cell.
+
+```bash
+python run_pipeline.py --stage infer10 --date 2025-08-30 --window-px 32 --fill
+```
+
+Coverage goes from 67% to 100% of the padded grid, with roughly 6.4 M of 13.0 M pixels extrapolated. Quote
+that number wherever the surface is used: extrapolated cells belong in the mapped extent and **not** in any
+accuracy statistic. Station-level metrics (test R², MAE, coverage, Moran's I) are unaffected by `--fill`,
+because they come from `--stage test` on the 16 reserved stations.
+
 ## The shared-split rebuild (comparable to the CNN-LSTM run)
 
 The CNN-LSTM branch ran on the same 83 usable stations and published a run in
