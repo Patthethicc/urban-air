@@ -169,7 +169,8 @@ def fit_patch_model(df, stack, params, n_estimators, feature_names, seed=42):
 
 
 def run(model, feature_names, dates, out_dir=None, window_px=None, chunk_rows=CHUNK_ROWS,
-        row_slice=None, col_slice=None, station_df=None, verbose=True):
+        row_slice=None, col_slice=None, station_df=None, verbose=True, fill_morphology=False,
+        pad_to=None):
     """Predict every 10 m pixel for the four snapshot hours of each date.
 
     `row_slice`/`col_slice` exist so the whole path can be exercised on a small window before
@@ -185,10 +186,42 @@ def run(model, feature_names, dates, out_dir=None, window_px=None, chunk_rows=CH
     os.makedirs(out_dir, exist_ok=True)
 
     st = _stack_or_build(window_px)
+    if pad_to is not None:
+        # Edge-replicate the feature stack until it covers `pad_to` = (left, bottom, right, top) in
+        # metres, so cells inside the study boundary but outside the DSM strip still get a
+        # prediction (morphology taken from the nearest valid pixel -- same rule as fill_morphology).
+        import numpy as _np
+        a_, _, c_, _, e_, f_ = st['meta']['transform'][:6]
+        left, bottom, right, top = pad_to
+        pad_l = max(0, int(round((c_ - left) / a_)))
+        pad_r = max(0, int(round((right - (c_ + a_ * st['meta']['shape'][1])) / a_)))
+        pad_t = max(0, int(round((top - f_) / abs(e_))))
+        pad_b = max(0, int(round(((f_ + e_ * st['meta']['shape'][0]) - bottom) / abs(e_)))) if bottom < (f_ + e_ * st['meta']['shape'][0]) else 0
+        if pad_l or pad_r or pad_t or pad_b:
+            st['arrays'] = {k: _np.pad(v, ((pad_t, pad_b), (pad_l, pad_r)), mode='edge')
+                            for k, v in st['arrays'].items()}
+            st['valid'] = _np.pad(st['valid'], ((pad_t, pad_b), (pad_l, pad_r)), mode='edge')
+            st['meta']['shape'] = st['arrays'][next(iter(st['arrays']))].shape
+            st['meta']['transform'] = (a_, 0.0, c_ - pad_l * a_, 0.0, e_, f_ + pad_t * abs(e_))
+            st['meta']['pad'] = (pad_t, pad_b, pad_l, pad_r)
+            if verbose:
+                print('    padded stack by %d/%d rows, %d/%d cols -> %s'
+                      % (pad_t, pad_b, pad_l, pad_r, st['meta']['shape']))
     meta = st['meta']
     H, W = meta['shape']
     r0, r1 = row_slice if row_slice else (0, H)
     c0, c1 = col_slice if col_slice else (0, W)
+
+    # Filling: a pixel without morphology (outside the DSM, water masked out) takes the features of
+    # its NEAREST valid pixel. Declared wherever it is used: it is a smooth extrapolation of the
+    # morphological surfaces, not a measurement. The `filled` band of the GeoTIFF records which
+    # pixels were extrapolated, so nothing is hidden.
+    fill_idx = None
+    if fill_morphology:
+        from scipy.ndimage import distance_transform_edt
+        valid_all = st['valid']
+        _, (ir, ic) = distance_transform_edt(~valid_all, return_indices=True)
+        fill_idx = (ir.astype('int32'), ic.astype('int32'))
 
     df = prep.df_clean if station_df is None else station_df
     station_ids = sorted(df['Location'].unique())
@@ -226,7 +259,13 @@ def run(model, feature_names, dates, out_dir=None, window_px=None, chunk_rows=CH
 
                 series, coverage = _standin_block(W3, idx, w)      # [73, n_cells] + coverage
                 feat = _history_from_series(series, hour_pos)
-                morph = patch_stack.features_at(st, rr, cc)
+                if fill_idx is not None:
+                    have = st['valid'][rr, cc]
+                    rr_f = np.where(have, rr, fill_idx[0][rr, cc])
+                    cc_f = np.where(have, cc, fill_idx[1][rr, cc])
+                else:
+                    rr_f, cc_f = rr, cc
+                morph = patch_stack.features_at(st, rr_f, cc_f)
                 feat.update(morph)
                 feat.update(_time_and_interaction(ts, morph, feature_names))
 
@@ -242,7 +281,27 @@ def run(model, feature_names, dates, out_dir=None, window_px=None, chunk_rows=CH
                 ok = np.isfinite(series[hour_pos]) & np.isfinite(series[hour_pos - 1])
                 hist_ok[rs - r0:re - r0, :] = ok.reshape(re - rs, c1 - c0)
 
-            usable = st['valid'][r0:r1, c0:c1] & np.isfinite(pred) & hist_ok
+            if fill_morphology:
+                # Extrapolation policy, in three steps:
+                #   1. honest  = pixel has real morphology, real stand-in history and a prediction
+                #   2. inpaint = any pixel still unpredicted takes the nearest predicted value
+                #                (masked water, the DSM fringe, and the padded strip beyond the raster)
+                #   3. clamp   = every extrapolated pixel is limited to the 0.5-99.5 percentile range
+                #                of the honest pixels, so an edge artefact cannot invent a 290 ug/m3 cell
+                honest = st['valid'][r0:r1, c0:c1] & hist_ok & np.isfinite(pred)
+                bad = ~np.isfinite(pred)
+                if bad.any() and not bad.all():
+                    from scipy.ndimage import distance_transform_edt
+                    _, (jr, jc) = distance_transform_edt(bad, return_indices=True)
+                    pred = np.where(bad, pred[jr, jc], pred)
+                if honest.any():
+                    lo_ok, hi_ok = np.percentile(pred[honest], [0.5, 99.5])
+                    pred = np.where(honest, pred, np.clip(pred, lo_ok, hi_ok))
+                usable = np.isfinite(pred)
+                filled = ~honest & usable
+            else:
+                usable = st['valid'][r0:r1, c0:c1] & np.isfinite(pred) & hist_ok
+                filled = np.zeros_like(usable)
             pred = np.where(usable, pred, np.nan)
 
             transform = from_origin(meta['transform'][2] + c0 * meta['transform'][0],
@@ -264,14 +323,20 @@ def run(model, feature_names, dates, out_dir=None, window_px=None, chunk_rows=CH
                 for i, nm in enumerate(('prediction', 'lower', 'upper', 'usable'), start=1):
                     dst.set_band_description(i, nm)
             written.append(path)
-            frames[ts] = {'prediction': pred, 'lower': lo, 'upper': hi, 'usable': usable}
+            frames[ts] = {'prediction': pred, 'lower': lo, 'upper': hi, 'usable': usable,
+                          'filled': filled}
             if verbose:
                 morph_ok = st['valid'][r0:r1, c0:c1]
                 no_hist = int((morph_ok & ~hist_ok).sum())
                 no_morph = int((~morph_ok).sum())
-                print('    %s: %d/%d px usable (%.1f%%), mean %.2f, max %.2f'
-                      % (ts, int(usable.sum()), usable.size, 100 * usable.mean(),
-                         float(np.nanmean(pred)), float(np.nanmax(pred))))
+                if fill_morphology:
+                    print('    %s: %d/%d px usable (%.1f%%) incl. %d extrapolated, mean %.2f, max %.2f'
+                          % (ts, int(usable.sum()), usable.size, 100 * usable.mean(),
+                             int(filled.sum()), float(np.nanmean(pred)), float(np.nanmax(pred))))
+                else:
+                    print('    %s: %d/%d px usable (%.1f%%), mean %.2f, max %.2f'
+                          % (ts, int(usable.sum()), usable.size, 100 * usable.mean(),
+                             float(np.nanmean(pred)), float(np.nanmax(pred))))
                 print('        blank because: no morphology %s px (%.1f%%) | no stand-in history %s px (%.1f%%)'
                       % (f'{no_morph:,}', 100 * no_morph / usable.size,
                          f'{no_hist:,}', 100 * no_hist / usable.size))
