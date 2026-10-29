@@ -48,8 +48,18 @@ def stage_split():
     shared_split.main()
 
 
-def stage_patch():
-    """Write data/patch_stats.csv (10 m patch statistics for the TEXTURE arm)."""
+def stage_patch(force=False):
+    """Write data/patch_stats.csv (10 m patch statistics for the TEXTURE arm).
+
+    Skipped when the file is already present -- a data bundle ships it, and rebuilding it needs the
+    10 m raster, which is the one thing a pruned bundle can be missing. `--force` rebuilds anyway.
+    """
+    import os
+    target = os.path.join(data.DATA_DIR, 'patch_stats.csv')
+    if os.path.exists(target) and not force:
+        print('  patch_stats.csv already present -- skipping the rebuild '
+              '(use --force-patch to rebuild)')
+        return
     from preprocessing import patch_stats
     patch_stats.main()
 
@@ -239,7 +249,7 @@ def stage_grid10(window_px=None):
     return patch_stack.save(st)
 
 
-def stage_infer10(date=None, window_px=None, out_dir=None, arm=None, limit=None):
+def stage_infer10(date=None, window_px=None, out_dir=None, arm=None, limit=None, fill=False):
     """Predict the full 10 m grid for the four snapshot hours of each date.
 
     `limit` is a developer aid: it restricts the run to the first N rows so the whole path can be
@@ -275,7 +285,14 @@ def stage_infer10(date=None, window_px=None, out_dir=None, arm=None, limit=None)
     from preprocessing import prep
     model = grid10m.fit_patch_model(prep.df_clean, st, params, n_est, feature_names)
     rows = (0, int(limit)) if limit else None
+    pad_to = None
+    if fill:
+        _b = os.path.join('data', 'ncr_cities.gpkg')
+        if os.path.exists(_b):
+            import geopandas as _gpd
+            pad_to = tuple(_gpd.read_file(_b).total_bounds)
     written, frames = grid10m.run(model, feature_names, dates, out_dir=out_dir, window_px=window_px,
+                                   fill_morphology=fill, pad_to=pad_to,
                                  row_slice=rows)
     st = patch_stack.load()
     meta = st['meta']
@@ -335,6 +352,10 @@ def main():
     ap.add_argument('--n-trials', type=int, default=20)
     ap.add_argument('--window-px', type=int, default=None,
                     help='grid10/infer10: patch window in 10 m pixels (32 = 320 m, the CNN-LSTM patch)')
+    ap.add_argument('--force-patch', action='store_true',
+                    help='patch: rebuild patch_stats.csv even when it already exists')
+    ap.add_argument('--fill', action='store_true',
+                    help='infer10: extrapolate morphology into gaps (nearest valid pixel) so every cell is painted')
     ap.add_argument('--limit-rows', type=int, default=None,
                     help='infer10: only the first N raster rows (developer check on a small window)')
     ap.add_argument('--row-stride', type=int, default=1,
@@ -401,7 +422,7 @@ def main():
     elif args.stage == 'grid10':
         stage_grid10(args.window_px)
     elif args.stage == 'infer10':
-        stage_infer10(args.date, args.window_px, args.out_dir, args.save_arm, args.limit_rows)
+        stage_infer10(args.date, args.window_px, args.out_dir, args.save_arm, args.limit_rows, args.fill)
     elif args.stage == 'figures':
         stage_figures(args.figures_arm)
     elif args.stage == 'geocp':
