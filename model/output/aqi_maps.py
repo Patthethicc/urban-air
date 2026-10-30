@@ -72,8 +72,9 @@ def display_grid(values: np.ndarray, cfg: dict) -> np.ndarray:
 
 
 def _outline_on(cfg: dict) -> bool:
-    """The black line between 'below' and 'above' the threshold is an option, off by default."""
-    return bool(cfg["output"].get("outline_above_threshold", False))
+    """The black line between 'below' and 'above' the threshold is an option, off by default (always on in the XGBoost look, whose
+    AQI map outlines the cells above 35)."""
+    return bool(cfg["output"].get("outline_above_threshold", False)) or xgboost_look(cfg)
 
 
 def _legend_entries(cfg: dict, threshold, threshold_label: str):
@@ -354,6 +355,24 @@ def view_extent(extent: tuple, cfg: dict) -> tuple:
     return (max(left, minx - mx), min(right, maxx + mx), max(bottom, miny - my), min(top, maxy + my))
 
 
+def xgboost_look(cfg: dict, style: str | None = None) -> bool:
+    """output.maps.look == 'xgboost': the maps (AQI and continuous) are drawn like the XGBoost branch's (xgboost/maps/surfaces.py), so
+    the two models' figures can be compared side by side. `style` is accepted for the callers that have one."""
+    return cartography.settings(cfg)["look"] == "xgboost"
+
+
+def style_colourbar(cbar, image, cfg: dict) -> None:
+    """XGBoost look: colourbar numbers every 5 ug/m3 inside the scale (0, 5, 10, 15, 20 on a 0-24 scale), as on the XGBoost maps.
+    Too short a scale for two ticks keeps the automatic ones."""
+    if not xgboost_look(cfg):
+        return
+    vmin, vmax = image.norm.vmin, image.norm.vmax
+    ticks = np.arange(np.ceil(vmin / 5.0) * 5.0, vmax + 1e-9, 5.0)
+    if len(ticks) >= 2:
+        cbar.set_ticks(ticks)
+        cbar.set_ticklabels([f"{t:g}" for t in ticks])
+
+
 def continuous_range(arrays, transform, cfg: dict) -> tuple:
     """(vmin, vmax) of the continuous colour scale: output.maps.continuous_range = [lo, hi], or 'auto' = the 2nd and 98th percentile of
     the predictions inside the NCR over all `arrays` (so every panel of a day shares one scale)."""
@@ -371,11 +390,13 @@ def continuous_range(arrays, transform, cfg: dict) -> tuple:
     if v.size == 0:
         return 0.0, 1.0
     lo, hi = np.percentile(v, [2, 98])
+    if xgboost_look(cfg):                                  # XGBoost's rule: a lone map starts at 0, a set shares [max(0, p2), p98]
+        lo = 0.0 if len(arrays) == 1 else max(0.0, float(lo))
     return (float(lo), float(hi)) if hi > lo else (float(lo) - 0.5, float(hi) + 0.5)
 
 
 def draw_surface(ax, values: np.ndarray, transform, crs, cfg: dict, threshold=None, stations=None, title=None, *,
-                 style: str = "aqi", vrange=None):
+                 style: str = "aqi", vrange=None, single: bool = False):
     """One snapshot on `ax`: AQI-coloured cells (style 'aqi') or a continuous colour scale (style 'continuous'), clipped to the NCR
     when a boundary is set, with city outlines and names, scale bar and north arrow (output.maps), the optional outline of cells above
     `threshold` (output.outline_above_threshold) and the stations. The title gets '(N cells, coverage C)'. Returns the image drawn
@@ -390,8 +411,10 @@ def draw_surface(ax, values: np.ndarray, transform, crs, cfg: dict, threshold=No
     cartography.fill_no_data(ax, cfg)
     based = _add_basemap(ax, crs, cfg) == "web"                  # tiles are busy: let them show through the cells
 
-    shown = cartography.clip_display(display_grid(values, cfg), (left, right, bottom, top), cfg)    # smoothed (or the raw cells), same area either way
-    alpha = 0.72 if based else 1.0
+    xgb = xgboost_look(cfg, style)                               # XGBoost look: the raw cells (no smoothing), the same see-through surface
+    shown = cartography.clip_display(np.asarray(values, dtype=np.float64) if xgb else display_grid(values, cfg),
+                                     (left, right, bottom, top), cfg)    # smoothed (or the raw cells), same area either way
+    alpha = (0.62 if style == "continuous" else 1.0) if xgb else 0.72 if based else 1.0     # XGBoost: see-through continuous, solid AQI cells
     if style == "aqi":
         cmap = ListedColormap([b["color"] for b in bins]).with_extremes(bad=(0, 0, 0, 0))
         image = ax.imshow(np.ma.masked_invalid(categorize(shown, cfg)), extent=extent, origin="upper", cmap=cmap,
@@ -409,7 +432,8 @@ def draw_surface(ax, values: np.ndarray, transform, crs, cfg: dict, threshold=No
             ys = top - (np.arange(shown.shape[0]) + 0.5) * (top - bottom) / shown.shape[0]
             ax.contour(xs, ys, above.astype(float), levels=[0.5], colors=[INK], linewidths=1.1, zorder=4)
     if stations is not None and len(stations):
-        ax.scatter(stations["x"], stations["y"], s=14, c=SURFACE, edgecolors=INK, linewidths=0.8, zorder=5)
+        ax.scatter(stations["x"], stations["y"], s=(22 if style == "aqi" else 12) if xgb else 14, c=SURFACE,
+                   edgecolors=INK, linewidths=(0.9 if style == "aqi" else 0.5) if xgb else 0.8, zorder=5)
     ax.set_xlim(vl, vr)
     ax.set_ylim(vb, vt)
     ax.set_aspect("equal")
@@ -417,10 +441,24 @@ def draw_surface(ax, values: np.ndarray, transform, crs, cfg: dict, threshold=No
     cartography.furniture(ax, cfg)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
+    if xgb:
+        ax.tick_params(labelsize=7)
+        ax.xaxis.label.set_fontsize(7)
+        ax.yaxis.label.set_fontsize(7)
     if title:
         s = cartography.grid_stats(values, transform, cfg)
-        sep = "\n" if len(title) > 22 else "   "                  # a long title would run past the map: put the counts on a second line
-        ax.set_title(f"{title}{sep}({s['cells']:,} cells, coverage {s['coverage']:.2f})", color=INK, fontsize=10, loc="left")
+        if xgb and single:                                       # XGBoost's two-line title: what is drawn, then the cells
+            head = title if title.startswith("PM2.5") else f"PM2.5 {title}"
+            if style == "continuous":
+                ax.set_title(f"{head} — continuous scale, {vmin:.1f}-{vmax:.1f} µg/m³\n"
+                             f"{s['cells']:,} cells · colour is comparable across snapshots", color=INK, fontsize=9, loc="left")
+            else:
+                limit = f" · outline = above {threshold:g} µg/m³" if threshold is not None else ""
+                ax.set_title(f"{head} — {abs(transform.a):g} m cells\n{s['cells']:,} usable cells · coverage {s['coverage']:.2f}{limit}",
+                             color=INK, fontsize=9, loc="left")
+        else:
+            sep = "\n" if len(title) > 22 else "   "              # a long title would run past the map: put the counts on a second line
+            ax.set_title(f"{title}{sep}({s['cells']:,} cells, coverage {s['coverage']:.2f})", color=INK, fontsize=10, loc="left")
     return image
 
 
@@ -428,8 +466,13 @@ def _stations(cfg: dict, stations):
     return stations if cfg["output"]["show_stations"] else None
 
 
-def _notes(style: str) -> list[str]:
-    return [NOTE_PM25, NOTE_HISTORY, NOTE_AQI if style == "aqi" else NOTE_CONTINUOUS]
+def _notes(style: str, cfg: dict | None = None) -> list[str]:
+    note = NOTE_CONTINUOUS
+    fixed = cartography.settings(cfg)["continuous_range"] if cfg is not None else "auto"
+    if style != "aqi" and fixed != "auto":
+        note = (f"Continuous colour scale, fixed at {float(fixed[0]):g} to {float(fixed[1]):g} µg/m³ and shared by every map "
+                "(and by the XGBoost maps), so colours compare directly; values beyond are shown in the end colours.")
+    return [NOTE_PM25, NOTE_HISTORY, NOTE_AQI if style == "aqi" else note]
 
 
 def _legend(fig, cfg: dict, style: str, threshold, bottom: float, ncol: int, fontsize: float) -> None:
@@ -442,12 +485,14 @@ def _legend(fig, cfg: dict, style: str, threshold, bottom: float, ncol: int, fon
 def render_snapshot(values, transform, crs, path: str, title: str, cfg: dict, threshold, stations=None, *, style: str = "aqi",
                     vrange=None, caption: str | None = None) -> str:
     o = cfg["output"]
-    fig, ax = plt.subplots(figsize=(6.6, 7.6), facecolor=SURFACE)
+    fig, ax = plt.subplots(figsize=(8.5, 7.6) if xgboost_look(cfg, style) else (6.6, 7.6), facecolor=SURFACE)
     ax.set_facecolor(SURFACE)
-    image = draw_surface(ax, values, transform, crs, cfg, threshold, _stations(cfg, stations), title, style=style, vrange=vrange)
+    image = draw_surface(ax, values, transform, crs, cfg, threshold, _stations(cfg, stations), title, style=style, vrange=vrange, single=True)
     if style == "continuous":
-        fig.colorbar(image, ax=ax, shrink=0.8, pad=0.02).set_label(UNIT, color=INK2, fontsize=8)
-    foot = cartography.footer(fig, cfg, caption, _notes(style))
+        cbar = fig.colorbar(image, ax=ax, shrink=0.7 if xgboost_look(cfg, style) else 0.8, pad=0.02)
+        cbar.set_label(UNIT, color=INK2, fontsize=8)
+        style_colourbar(cbar, image, cfg)
+    foot = cartography.footer(fig, cfg, caption, _notes(style, cfg))
     _legend(fig, cfg, style, threshold, foot + 0.005, 2, 7.5)
     fig.tight_layout(rect=(0, foot + 0.13, 1, 1))
     fig.savefig(path, dpi=o["dpi"], facecolor=SURFACE)
@@ -474,14 +519,46 @@ def render_panels(stack, labels: list[str], transform, crs, path: str, title: st
         ax.set_facecolor(SURFACE)
         image = draw_surface(ax, stack[i], transform, crs, cfg, threshold, _stations(cfg, stations), labels[i], style=style, vrange=vrange)
     fig.suptitle(title, color=INK, fontsize=11, x=0.02, ha="left")
-    foot = cartography.footer(fig, cfg, caption, _notes(style))
+    foot = cartography.footer(fig, cfg, caption, _notes(style, cfg))
     _legend(fig, cfg, style, threshold, foot + 0.005, 3, 8)
     right = 0.9 if style == "continuous" else 1.0
     bottom = foot + 0.06
     fig.tight_layout(rect=(0, bottom, right, 0.97), h_pad=2.5)
     if style == "continuous" and image is not None:
         cax = fig.add_axes([0.92, bottom + 0.15 * (0.97 - bottom), 0.018, 0.6 * (0.97 - bottom)])
-        fig.colorbar(image, cax=cax).set_label(UNIT, color=INK2, fontsize=9)
+        cbar = fig.colorbar(image, cax=cax)
+        cbar.set_label(UNIT, color=INK2, fontsize=9)
+        style_colourbar(cbar, image, cfg)
     fig.savefig(path, dpi=o["dpi"], facecolor=SURFACE)
     plt.close(fig)
     return path
+
+
+FILE_STEMS = {"aqi": ("aqi_{h}", "daily_panels", "daily_mean"),                       # file stems per style (the AQI names are the old ones)
+              "continuous": ("continuous_{h}", "continuous_panels", "continuous_daily_mean")}
+
+
+def render_day(stack, labels: list[str], transform, crs, maps_dir, date, cfg: dict, stations, caption: str | None, mean=None) -> None:
+    """All the PNG maps of one date (output.maps.styles): an hourly map per snapshot, the panels, and the daily mean when `mean` is given.
+    `stack` = predictions [hours, rows, cols]. Used by --stage infer and to redraw old results from their prediction_volume.tif."""
+    from pathlib import Path
+
+    o = cfg["output"]
+    maps_dir = Path(maps_dir)
+    maps_dir.mkdir(parents=True, exist_ok=True)
+    styles = cartography.settings(cfg)["styles"]
+    shared = continuous_range(stack, transform, cfg) if "continuous" in styles else None      # one colour scale for all hours of the day
+    for style in styles:
+        hourly_stem, panels_stem, mean_stem = FILE_STEMS[style]
+        vr = shared if style == "continuous" else None
+        for i, label in enumerate(labels):
+            render_snapshot(stack[i], transform, crs, str(maps_dir / f"{hourly_stem.format(h=label.replace(':', ''))}.png"),
+                            f"PM2.5 prediction, {date:%Y-%m-%d} {label}", cfg, o["highlight_threshold"], stations, style=style,
+                            vrange=vr, caption=caption)
+        if len(labels) > 1:
+            render_panels(stack, labels, transform, crs, str(maps_dir / f"{panels_stem}.png"), f"PM2.5 prediction, {date:%Y-%m-%d}", cfg,
+                          o["highlight_threshold"], stations, style=style, vrange=vr, caption=caption)
+            if mean is not None:
+                render_snapshot(mean, transform, crs, str(maps_dir / f"{mean_stem}.png"),
+                                f"24-hour mean of {len(labels)} snapshots, {date:%Y-%m-%d}", cfg, o["daily_guideline"], stations,
+                                style=style, caption=caption)

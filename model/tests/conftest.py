@@ -20,6 +20,8 @@ def base_cfg():
 def cfg(base_cfg):
     out = deepcopy(base_cfg)
     out["data"]["paths"]["boundary"] = None        # maps are tested on synthetic coordinates: never clip them to the real NCR
+    # the shipped defaults (XGBoost look, fixed 0-25 scale) have their own tests; the mechanics tests run on the neutral baseline
+    out["output"]["maps"] = {**(out["output"].get("maps") or {}), "look": "default", "continuous_range": "auto"}
     return out
 
 

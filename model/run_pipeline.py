@@ -468,8 +468,7 @@ def infer(cfg: dict, run_id: str | None, timestamps: list[str], dates: list[str]
     (configs/inference.yaml)."""
     from inference.cell_inference import _hour_index, openaq_only, predict_surface, reference_stations
     from output import cartography
-    from output.aqi_maps import (STYLES, basemap_settings, continuous_range, render_panels, render_snapshot,
-                                 reset_basemap_state)
+    from output.aqi_maps import STYLES, basemap_settings, render_day, reset_basemap_state
     from output.volume import daily_mean, expand_dates, group_by_date, summarize_date, write_volume
     from training.run_info import write_json
     from uncertainty.geocp_surface import interval_layers
@@ -521,23 +520,7 @@ def infer(cfg: dict, run_id: str | None, timestamps: list[str], dates: list[str]
         cell_m = abs(tr.a)
         caption = (f"{date:%Y-%m-%d}, run {run_id}; {cell_m:g} m prediction cells (inference.stride_px {cfg['inference']['stride_px']}), "
                    f"{ctx['crs']}; city boundaries: GADM 4.1." + (" Every cell's history comes from OpenAQ stations only." if only else ""))
-        shared = continuous_range(stack["prediction"], tr, cfg) if "continuous" in styles else None     # one colour scale for all hours of the day
-        files = {"aqi": ("aqi_{h}", "daily_panels", "daily_mean"),                       # file stems per style (the AQI names are the old ones)
-                 "continuous": ("continuous_{h}", "continuous_panels", "continuous_daily_mean")}
-        for style in styles:
-            hourly_stem, panels_stem, mean_stem = files[style]
-            vr = shared if style == "continuous" else None
-            for i, label in enumerate(labels):
-                render_snapshot(stack["prediction"][i], tr, ctx["crs"], str(out_dir / "maps" / f"{hourly_stem.format(h=label.replace(':', ''))}.png"),
-                                f"PM2.5 prediction, {date:%Y-%m-%d} {label}", cfg, o["highlight_threshold"], sensors, style=style,
-                                vrange=vr, caption=caption)
-            if len(group) > 1:
-                render_panels(stack["prediction"], labels, tr, ctx["crs"], str(out_dir / "maps" / f"{panels_stem}.png"),
-                              f"PM2.5 prediction, {date:%Y-%m-%d}", cfg, o["highlight_threshold"], sensors, style=style, vrange=vr,
-                              caption=caption)
-                render_snapshot(mean, tr, ctx["crs"], str(out_dir / "maps" / f"{mean_stem}.png"),
-                                f"24-hour mean of {len(group)} snapshots, {date:%Y-%m-%d}", cfg, o["daily_guideline"], sensors,
-                                style=style, caption=caption)
+        render_day(stack["prediction"], labels, tr, ctx["crs"], out_dir / "maps", date, cfg, sensors, caption, mean)
         from output.aqi_maps import last_basemap
         summary = summarize_date(group, stack["prediction"], stack["width"], cfg)
         summary["lag_stations"] = "OpenAQ only" if only else "all reference stations"

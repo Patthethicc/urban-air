@@ -60,7 +60,11 @@ maps:                     # what the PNG maps and the explain figures are drawn 
   caption: true           # a source line under each figure: date, run, cell size, boundary source
   metric_notes: true      # a few lines under each figure saying what the numbers and colours mean (cells, coverage, hot and cold, ...)
   continuous_cmap: viridis
-  continuous_range: auto  # auto = the 2nd to 98th percentile of the day's predictions inside the NCR, shared by all panels;
+  look: xgboost           # 'xgboost' = draw the AQI and the continuous maps like the XGBoost branch (xgboost/maps/surfaces.py): the raw cells (no
+                          # smoothing), see-through continuous surface (alpha 0.62), its two-line titles, colourbar numbers every 5, station dots,
+                          # outline above 35 on the AQI maps, so both models' figures can be compared side by side. 'default' = the old CNN-LSTM look.
+  continuous_range: [0, 25]  # FIXED and shared with the XGBoost maps (xgboost/maps/surfaces.py SHARED_RANGE), so the colours of both models compare directly.
+                          # Other settings: auto = the 2nd to 98th percentile of the day's predictions inside the NCR, shared by all panels;
                           # or [lo, hi] in ug/m3 to compare days on one fixed scale
 dpi: 150
 explain:                  # Grad-CAM on the CNN branch (--stage explain)

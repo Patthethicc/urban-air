@@ -20,7 +20,7 @@ NO_DATA = "#d9d9d9"
 LABEL_NUDGE = {"Navotas": (-900, -500, "right"), "Malabon": (500, 500, "left"), "San Juan": (-300, 450, "right"),
                "Pateros": (900, -300, "left")}
 DEFAULTS = {"styles": ["aqi", "continuous"], "clip_to_boundary": True, "city_labels": True, "scale_bar": True,
-            "north_arrow": True, "caption": True, "metric_notes": True, "continuous_cmap": "viridis", "continuous_range": "auto"}
+            "north_arrow": True, "caption": True, "metric_notes": True, "continuous_cmap": "viridis", "continuous_range": [0, 25], "look": "xgboost"}
 _CACHE: dict = {}
 
 

@@ -292,7 +292,8 @@ def test_coverage_says_when_the_boundary_file_is_missing_instead_of_failing(cfg,
 def test_the_default_config_points_at_the_ncr_file_and_the_map_settings_exist(base_cfg):
     assert base_cfg["data"]["paths"]["boundary"].replace("\\", "/").endswith("data/Boundaries/ncr_cities.gpkg")
     m = cartography.settings(base_cfg)
-    assert m["styles"] == ["aqi", "continuous"] and m["clip_to_boundary"] and m["continuous_range"] == "auto"
+    assert m["styles"] == ["aqi", "continuous"] and m["clip_to_boundary"]
+    assert m["look"] == "xgboost" and m["continuous_range"] == [0, 25]                       # shipped: the XGBoost look on its fixed shared scale
     assert base_cfg["output"]["explain"]["min_separation_m"] == 1000
     json.dumps(m)
 
@@ -310,3 +311,20 @@ def test_cells_without_a_prediction_inside_the_ncr_show_as_grey_no_data(ncr):
     aqi_maps.draw_surface(ax, _prediction(), TRANSFORM, CRS, ncr, None, None, "t", style="continuous")
     assert len(ax.collections) == 0
     plt.close(fig)
+
+
+# ------------------------------------------------------------------------------ the XGBoost look of the continuous maps
+def test_the_xgboost_look_is_off_by_default_and_changes_scale_title_and_cells(ncr, tmp_path):
+    grid = _prediction() + 5.0                                  # 13 .. 45, so p2 is well above 0
+    assert not aqi_maps.xgboost_look(ncr) and aqi_maps.continuous_range([grid], TRANSFORM, ncr)[0] > 5
+    ncr["output"]["maps"] = {**(ncr["output"].get("maps") or {}), "look": "xgboost"}
+    cartography.reset()
+    assert aqi_maps.xgboost_look(ncr)
+    assert aqi_maps.continuous_range([grid], TRANSFORM, ncr)[0] == 0.0                         # a lone map starts at 0, like XGBoost's
+    assert aqi_maps.continuous_range([grid, grid], TRANSFORM, ncr)[0] > 5                      # a set shares [max(0, p2), p98]
+    fig, ax = aqi_maps.plt.subplots()
+    aqi_maps.draw_surface(ax, grid, TRANSFORM, CRS, ncr, None, None, "2025-07-23 12:00", style="continuous", single=True)
+    assert "continuous scale" in ax.get_title("left") and "colour is comparable across snapshots" in ax.get_title("left")
+    aqi_maps.plt.close(fig)
+    aqi_maps.render_snapshot(grid, TRANSFORM, CRS, str(tmp_path / "x.png"), "2025-07-23 12:00", ncr, None, style="continuous", caption="c")
+    assert (tmp_path / "x.png").stat().st_size > 8_000

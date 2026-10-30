@@ -19,9 +19,11 @@ NOTE_MAP = ("Colours: the predicted PM2.5 (µg/m³) of this hour, as on the pred
 def plot_gradcam_map(pred_map: np.ndarray, transform, crs, cells: list[dict], cfg: dict, path: str, title: str, *,
                      stations=None, caption: str | None = None, dpi: int = 150) -> str:
     """`cells`: dicts with group ('hot' or 'cold'), number, x, y (map coordinates) and predicted."""
-    fig, ax = plt.subplots(figsize=(6.8, 8.0), facecolor=SURFACE)
+    xgb = aqi_maps.xgboost_look(cfg)
+    fig, ax = plt.subplots(figsize=(8.5, 7.6) if xgb else (6.8, 8.0), facecolor=SURFACE)
     ax.set_facecolor(SURFACE)
-    image = aqi_maps.draw_surface(ax, pred_map, transform, crs, cfg, None, aqi_maps._stations(cfg, stations), title, style="continuous")
+    image = aqi_maps.draw_surface(ax, pred_map, transform, crs, cfg, None, aqi_maps._stations(cfg, stations), title, style="continuous",
+                                  single=True)
     for group, color, marker in (("hot", HOT, "o"), ("cold", COLD, "s")):
         pts = [c for c in cells if c["group"] == group]
         if not pts:
@@ -31,7 +33,9 @@ def plot_gradcam_map(pred_map: np.ndarray, transform, crs, cells: list[dict], cf
         for c in pts:
             ax.text(c["x"], c["y"], str(c["number"]), fontsize=6.5, color="white", ha="center", va="center", zorder=10,
                     fontweight="bold", path_effects=[pe.withStroke(linewidth=0.6, foreground=color)])
-    fig.colorbar(image, ax=ax, shrink=0.8, pad=0.02).set_label(aqi_maps.UNIT, color=INK2, fontsize=8)
+    cbar = fig.colorbar(image, ax=ax, shrink=0.7 if xgb else 0.8, pad=0.02)
+    cbar.set_label(aqi_maps.UNIT, color=INK2, fontsize=8)
+    aqi_maps.style_colourbar(cbar, image, cfg)
     n_hot, n_cold = sum(c["group"] == "hot" for c in cells), sum(c["group"] == "cold" for c in cells)
     handles = [Line2D([0], [0], marker="o", color="none", markerfacecolor=HOT, markeredgecolor="white", markersize=9,
                       label=f"hot: the {n_hot} highest predicted cells"),
