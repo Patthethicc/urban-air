@@ -246,12 +246,18 @@ def run(model, feature_names, dates, out_dir=None, window_px=None, chunk_rows=CH
 
             pred = np.full((r1 - r0, c1 - c0), np.nan, dtype=np.float32)
             hist_ok = np.zeros((r1 - r0, c1 - c0), dtype=bool)
+            far_px = np.zeros((r1 - r0, c1 - c0), dtype=bool)     # no station reporting nearby
             for rs in range(r0, r1, chunk_rows):
                 re = min(rs + chunk_rows, r1)
                 rr, cc = np.meshgrid(np.arange(rs, re), np.arange(c0, c1), indexing='ij')
                 rr, cc = rr.ravel(), cc.ravel()
                 cx, cy = patch_stack.xy_of_pixels(meta, rr, cc)
-                dist, idx = tree.query(np.c_[cx, cy], k=min(4, len(station_ids)))
+                # Wider than the classic k=4: when the nearest stations are dark (the QC network stops
+                # reporting before October 2026) the stand-in must reach the next ones instead of
+                # leaving NaN history, which drove the model into its missing-value branch and painted
+                # a whole district one value. _standin_block is NaN-aware, so extra neighbours only
+                # matter where the close ones are silent.
+                dist, idx = tree.query(np.c_[cx, cy], k=min(12, len(station_ids)))
                 dist = np.atleast_2d(dist)
                 idx = np.atleast_2d(idx)
                 w = 1.0 / np.maximum(dist, 1.0)
@@ -280,25 +286,56 @@ def run(model, feature_names, dates, out_dir=None, window_px=None, chunk_rows=CH
                 # false 240 ug/m3 wedge over Manila Bay. Require the most recent hour to be finite.
                 ok = np.isfinite(series[hour_pos]) & np.isfinite(series[hour_pos - 1])
                 hist_ok[rs - r0:re - r0, :] = ok.reshape(re - rs, c1 - c0)
+                # distance to the closest station that actually reported at this hour: beyond 3 km the
+                # stand-in is a regional extrapolation, and the model colours it as one district
+                nb_vals = W3[hour_pos][idx]                       # (n_px, k): the neighbour readings
+                rep = np.where(np.isfinite(nb_vals), dist, np.inf).min(axis=1)
+                far_px[rs - r0:re - r0, :] = (rep > 3000.0).reshape(re - rs, c1 - c0)
 
             if fill_morphology:
-                # Extrapolation policy, in three steps:
-                #   1. honest  = pixel has real morphology, real stand-in history and a prediction
-                #   2. inpaint = any pixel still unpredicted takes the nearest predicted value
-                #                (masked water, the DSM fringe, and the padded strip beyond the raster)
-                #   3. clamp   = every extrapolated pixel is limited to the 0.5-99.5 percentile range
-                #                of the honest pixels, so an edge artefact cannot invent a 290 ug/m3 cell
-                honest = st['valid'][r0:r1, c0:c1] & hist_ok & np.isfinite(pred)
-                bad = ~np.isfinite(pred)
-                if bad.any() and not bad.all():
-                    from scipy.ndimage import distance_transform_edt
-                    _, (jr, jc) = distance_transform_edt(bad, return_indices=True)
-                    pred = np.where(bad, pred[jr, jc], pred)
-                if honest.any():
-                    lo_ok, hi_ok = np.percentile(pred[honest], [0.5, 99.5])
-                    pred = np.where(honest, pred, np.clip(pred, lo_ok, hi_ok))
+                # Split the model into a large-scale level and a local anomaly:
+                #   level   = Gaussian average of the SUPPORTED predictions (observations set the level)
+                #   anomaly = prediction minus its own local average (morphology-driven texture)
+                # An unsupported pixel gets level + anomaly, so the map keeps its structure instead of
+                # turning into concentric rings around the few districts that still report.
+                supported = st['valid'][r0:r1, c0:c1] & hist_ok & ~far_px
+                from scipy.ndimage import gaussian_filter
+                if supported.any() and (~supported).any():
+                    finite = np.isfinite(pred)
+                    wgt = (supported & finite).astype(np.float32)
+                    vals = np.where(wgt > 0, pred, 0.0).astype(np.float32)
+
+                    def _wmean(src, w, sigma):
+                        num = gaussian_filter(np.where(w > 0, src, 0.0) * w, sigma, mode="nearest")
+                        den = gaussian_filter(w, sigma, mode="nearest")
+                        floor = max(1e-6, 1e-3 * float(den.max()))
+                        est = num / np.maximum(den, floor)
+                        # Where the kernel finds no support at all (the raster's outer rows), fall back
+                        # to the mean of the supported field instead of a near-zero local average, which
+                        # is what painted the dark strip along the northern edge.
+                        tot = float(w.sum())
+                        glob = float((src * w).sum()) / tot if tot > 0 else 0.0
+                        return np.where(den >= floor, est, glob)
+
+                    level = _wmean(pred, wgt, 150.0)                  # ~1.5 km: the observed level
+                    local = _wmean(pred, wgt, 12.0)                   # ~120 m: the model's own texture
+                    anomaly = np.where(wgt > 0, pred - local, 0.0)
+                    anom_w = (wgt > 0).astype(np.float32)
+                    anom = _wmean(anomaly, anom_w, 40.0)              # ~400 m of texture survives
+                    anom = np.clip(anom, -6.0, 6.0)                   # texture may shade the level, not replace it
+                    pad = st['meta'].get('pad')
+                    if pad:                                          # outside the raster: level only, no texture
+                        pt, pb, pl, pr = pad
+                        inr = np.zeros(pred.shape, dtype=bool)
+                        inr[pt:pred.shape[0] - pb, pl:pred.shape[1] - pr] = True
+                        anom = np.where(inr, anom, 0.0)
+                    filled = np.where(supported, pred, level + anom)
+                    pred = np.where(finite, filled, pred).astype(np.float32)
+                # The padded strip (rows/cols added to reach the NCR box) is edge-replicated
+                # morphology with no station nearby: hold it to the range the model reaches inside
+                # the real raster, otherwise it shows as a dark band along the northern edge.
                 usable = np.isfinite(pred)
-                filled = ~honest & usable
+                filled = ~supported & usable
             else:
                 usable = st['valid'][r0:r1, c0:c1] & np.isfinite(pred) & hist_ok
                 filled = np.zeros_like(usable)
