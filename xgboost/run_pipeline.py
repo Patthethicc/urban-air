@@ -285,6 +285,10 @@ def stage_infer10(date=None, window_px=None, out_dir=None, arm=None, limit=None,
     from preprocessing import prep
     model = grid10m.fit_patch_model(prep.df_clean, st, params, n_est, feature_names)
     rows = (0, int(limit)) if limit else None
+    # Pad the grid to the study boundary so land beyond the raster (north Caloocan, south Muntinlupa)
+    # is painted too. The strip is filled with the interpolated LEVEL only -- the texture term is
+    # suppressed outside the raster -- and the kernel falls back to the field mean where it has no
+    # support, so the edge no longer collapses to a dark band.
     pad_to = None
     if fill:
         _b = os.path.join('data', 'ncr_cities.gpkg')

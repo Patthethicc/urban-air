@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import rasterio  # noqa: E402
 from matplotlib.patches import Patch, Rectangle  # noqa: E402
-from matplotlib.ticker import FuncFormatter  # noqa: E402
+from matplotlib.ticker import FuncFormatter, MultipleLocator  # noqa: E402
 from pyproj import Transformer  # noqa: E402
 
 INK, INK2, SURFACE, NO_DATA = "#0b0b0b", "#52514e", "#fcfcfb", "#d9d9d9"
@@ -34,16 +34,85 @@ HOURS = ("0800", "1200", "1700", "2100")
 CLOCK = {"0800": "08:00", "1200": "12:00", "1700": "17:00", "2100": "21:00"}
 LABEL_NUDGE = {"Navotas": (-900, -500, "right"), "Malabon": (500, 500, "left"),
                "San Juan": (-300, 450, "right"), "Pateros": (900, -300, "left")}
-# OSM Mapnik tiles, greyed and blended toward white below: the same visual effect as CartoDB.Positron,
-# with no API key. Set XGB_TILE_URL to use another provider.
-TILE_URL = os.environ.get("XGB_TILE_URL",
-                        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/"
-                        "MapServer/tile/{z}/{y}/{x}")   # light, roads and labels, no API key
-TILE_LIGHTEN = float(os.environ.get("XGB_TILE_LIGHTEN", "0.15"))   # 0 = raw tiles, 1 = pure white
-ATTRIB = "Basemap: Esri, HERE, Garmin, OpenStreetMap contributors.  Boundaries: GADM 4.1."
+# Basemap provider. With CARTO_API_KEY in the environment we fetch CartoDB Positron itself -- the
+# tiles the CNN-LSTM figures use -- with the key appended, and draw them as they come (Positron is
+# already the pale blue canvas). Without a key, Esri street tiles, desaturated and tinted to match.
+# The key is only read from the environment and never printed.
+CARTO_KEY = os.environ.get("CARTO_API_KEY") or os.environ.get("carto_api_key") or ""
+if CARTO_KEY:
+    TILE_URL = "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png?key=" + CARTO_KEY
+    TILE_PREFIX = "carto"
+    TILE_LIGHTEN, TILE_GAMMA = 0.0, 1.0
+    TILE_TINT, TILE_TINT_ADD = (1.0, 1.0, 1.0), (0.0, 0.0, 0.0)
+    TILE_ZOOM = int(os.environ.get("XGB_TILE_ZOOM", "14"))
+    ATTRIB = "(C) OpenStreetMap contributors (C) CARTO"
+else:
+    TILE_URL = os.environ.get("XGB_TILE_URL",
+                              "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/"
+                              "MapServer/tile/{z}/{y}/{x}")
+    TILE_PREFIX = "street"
+    TILE_LIGHTEN = float(os.environ.get("XGB_TILE_LIGHTEN", "0.70"))
+    TILE_GAMMA = float(os.environ.get("XGB_TILE_GAMMA", "1.55"))
+    TILE_TINT, TILE_TINT_ADD = (0.972, 0.995, 1.020), (0.0, 3.0, 12.0)
+    TILE_ZOOM = int(os.environ.get("XGB_TILE_ZOOM", "13"))
+    ATTRIB = "Basemap: Esri, HERE, Garmin, OpenStreetMap contributors.  Boundaries: GADM 4.1."
 CACHE = os.path.join("data", "basemap_cache")
 # the view the CNN-LSTM figures use (their boundary file stops at ~1594 km northing)
 CNN_VIEW = (277000.0, 1594000.0, 298500.0, 1632500.0)
+# The scale both branches now share. model/configs/output.yaml sets continuous_range: [0, 25] and the CNN
+# draws with look: xgboost, which copies xgboost/maps/surfaces.py: SURFACE_ALPHA 0.62, stations s=12 lw=0.5,
+# colourbar numbers every 5. Keep these in step with that file or the two figures stop matching.
+SHARED_RANGE = (0.0, 60.0)    # ONE constant scale for every date and both branches
+TICK_STEP = 10.0
+LABEL_TICKS = (20.0, 30.0, 40.0, 50.0)   # the numbers printed on the bar
+SURFACE_ALPHA = 1.0     # solid inside the NCR; the basemap shows outside the boundary and in the holes
+
+
+# --- the basemap, exactly as the CNN-LSTM branch draws it ------------------------------------------
+# model/output/aqi_maps.py does:  cx.add_basemap(ax, crs=str(crs), source=CartoDB.Positron, zorder=0)
+# with the CARTO key from the environment injected as ?key=..., and the tiles cached under
+# output.basemap.basemap_cache_dir. That is the pale blue overlay in their figures. We use the same
+# call when contextily and a key are available, and fall back to the Esri mosaic below when not.
+_BASEMAP_STATE = {"web_ok": None}
+
+
+def _carto_source():
+    """contextily's CartoDB.Positron provider with the key applied, or None when unavailable."""
+    import os
+    try:
+        import contextily as cx
+    except Exception:
+        return None, None
+    key = os.environ.get("CARTO_API_KEY") or os.environ.get("carto_api_key")
+    provider = cx.providers.CartoDB.Positron
+    if key:
+        provider = dict(provider)
+        provider["url"] = provider["url"].replace("{z}", "{z}") + ("?key=" + key if "key=" not in provider["url"] else "")
+    elif "key" not in provider["url"]:
+        # without a key CARTO returns watermarked tiles, which their pipeline also refuses
+        return None, None
+    return cx, provider
+
+
+def _web_basemap(ax, crs="EPSG:32651"):
+    """True when contextily drew the tiles on `ax`. Mirrors aqi_maps._web_basemap."""
+    if _BASEMAP_STATE["web_ok"] is False:
+        return False
+    cx, provider = _carto_source()
+    if cx is None:
+        _BASEMAP_STATE["web_ok"] = False
+        return False
+    try:
+        import os
+        if os.path.isdir(CACHE) and hasattr(cx, "set_cache_dir"):
+            cx.set_cache_dir(CACHE)
+        cx.add_basemap(ax, crs=crs, source=provider, zorder=0)
+        _BASEMAP_STATE["web_ok"] = True
+        return True
+    except Exception as exc:
+        print("  contextily basemap unavailable (%s)" % str(exc)[:80])
+        _BASEMAP_STATE["web_ok"] = False
+        return False
 
 
 def _merc(lon, lat):
@@ -53,7 +122,7 @@ def _merc(lon, lat):
 
 
 def _tile(z, x, y):
-    p = os.path.join(CACHE, "esri_%d_%d_%d.png" % (z, x, y))
+    p = os.path.join(CACHE, "%s_%d_%d_%d.png" % (TILE_PREFIX, z, x, y))
     if os.path.exists(p):
         return open(p, "rb").read()
     os.makedirs(CACHE, exist_ok=True)
@@ -64,8 +133,9 @@ def _tile(z, x, y):
     return b
 
 
-def basemap(bounds, z=13):
+def basemap(bounds, z=None):
     """Basemap RGB + extent in EPSG:32651 for `bounds` = (left, bottom, right, top) in UTM metres."""
+    z = TILE_ZOOM if z is None else z
     from PIL import Image
     from rasterio.transform import from_bounds
     from rasterio.warp import Resampling, reproject
@@ -94,7 +164,11 @@ def basemap(bounds, z=13):
     arr = np.asarray(mosaic).astype("float32")
     grey = arr.mean(axis=2, keepdims=True)                       # desaturate
     arr = 255.0 - (255.0 - grey) * (1.0 - TILE_LIGHTEN)          # blend toward white
-    src = np.clip(np.repeat(arr, 3, axis=2), 0, 255).astype("uint8")
+    arr = 255.0 * np.power(np.clip(arr, 0, 255) / 255.0, TILE_GAMMA)   # contrast: labels and roads
+    r = np.clip(arr * TILE_TINT[0] + TILE_TINT_ADD[0], 0, 255)         # slight blue cast
+    g = np.clip(arr * TILE_TINT[1] + TILE_TINT_ADD[1], 0, 255)
+    b = np.clip(arr * TILE_TINT[2] + TILE_TINT_ADD[2], 0, 255)
+    src = np.concatenate([r, g, b], axis=2).astype("uint8")
     src_transform = from_bounds(left, bottom, right, top, src.shape[1], src.shape[0])
     to_utm = Transformer.from_crs("EPSG:4326", "EPSG:32651", always_xy=True)
     ulx, uly = to_utm.transform(left, top)
@@ -145,6 +219,8 @@ def north_arrow(ax, zorder=8):
 
 def km_axes(ax):
     to_km = FuncFormatter(lambda v, _: f"{v / 1000:g}")
+    ax.xaxis.set_major_locator(MultipleLocator(5000))     # a tick every 5 km, as on their maps
+    ax.yaxis.set_major_locator(MultipleLocator(5000))
     ax.xaxis.set_major_formatter(to_km)
     ax.yaxis.set_major_formatter(to_km)
     ax.set_xlabel("easting (km)", fontsize=7, color=INK2)
@@ -206,7 +282,7 @@ def clip_to(vals, transform, boundary):
     return np.where(inside, vals, np.nan)
 
 
-def draw_panel(ax, tif, vmin, vmax, pts=None, boundary=None, base=True, alpha=0.72,
+def draw_panel(ax, tif, vmin, vmax, pts=None, boundary=None, base=True, alpha=SURFACE_ALPHA,
                label_cities=True, view_window=None):
     vals, transform = read_band1(tif)
     vals = clip_to(vals, transform, boundary)
@@ -222,19 +298,23 @@ def draw_panel(ax, tif, vmin, vmax, pts=None, boundary=None, base=True, alpha=0.
     ax.set_ylim(view[1], view[3])
     ax.set_facecolor(SURFACE)
     if base:
-        try:
-            img, ext = basemap((view[0], view[1], view[2], view[3]))
-            ax.imshow(img, extent=ext, zorder=0, interpolation="bilinear")
-        except Exception as exc:                       # offline and no cache: plain paper
-            print("  basemap unavailable (%s)" % exc)
-            base = False
+        base = _web_basemap(ax)                        # their method: contextily + CartoDB Positron
+        if not base:
+            try:                                       # fallback: the Esri mosaic we fetch ourselves
+                img, ext = basemap((view[0], view[1], view[2], view[3]))
+                ax.imshow(img, extent=ext, zorder=0, interpolation="bilinear")
+                base = True
+            except Exception as exc:                   # offline and no cache: plain paper
+                print("  basemap unavailable (%s)" % exc)
+                base = False
     if boundary is not None:
         boundary.plot(ax=ax, facecolor=NO_DATA, edgecolor="none", zorder=1)
     im = ax.imshow(np.ma.masked_invalid(vals), extent=extent, origin="upper", cmap="viridis",
                    vmin=vmin, vmax=vmax, interpolation="nearest", zorder=2, alpha=alpha if base else 1.0)
     if pts is not None:
-        ax.scatter(pts[0], pts[1], s=14, c=SURFACE, edgecolors=INK, linewidths=0.8, zorder=5)
+        ax.scatter(pts[0], pts[1], s=12, c=SURFACE, edgecolors=INK, linewidths=0.5, zorder=5)
     draw_cities(ax, boundary, labels=label_cities)
+    _attribution(ax)
     ax.set_aspect("equal")
     ax.ticklabel_format(useOffset=False, style="plain")
     km_axes(ax)
@@ -245,18 +325,51 @@ def draw_panel(ax, tif, vmin, vmax, pts=None, boundary=None, base=True, alpha=0.
     return im
 
 
+class _Block:
+    """A stand-in axes whose bbox is the union of several panels, so one colourbar can span them."""
+
+    def __init__(self, axes):
+        boxes = [a.get_position() for a in axes]
+        self._bbox = type("B", (), {"x1": max(b.x1 for b in boxes),
+                                    "y0": min(b.y0 for b in boxes),
+                                    "height": max(b.y1 for b in boxes) - min(b.y0 for b in boxes)})()
+    def get_position(self):
+        return self._bbox
+
+
+def _colourbar(fig, im, ax, vmin, vmax, width=0.028, height_frac=0.66, gap=0.024, ticks=None):
+    """A colourbar matching the CNN-LSTM panel figures.
+
+    Their bar is labelled every 10 ug/m3 (20 / 30 / 40 / 50) on the polluted day and every 2 on the
+    clean day, spans about two thirds of the panel block, and carries no legend of its own. Passing
+    `ticks` overrides the automatic step.
+    """
+    import numpy as _np
+    b = ax.get_position()
+    if ticks is None:                                  # 20/30/40/50 inside a 0-60 bar: room below and above
+        ticks = [t for t in LABEL_TICKS if vmin < t < vmax] or None
+    cax = fig.add_axes([b.x1 + gap, b.y0 + b.height * (1 - height_frac) / 2.0, width,
+                        b.height * height_frac])
+    cb = fig.colorbar(im, cax=cax, ticks=ticks)
+    cb.set_label("PM$_{2.5}$ (µg/m$^3$)", fontsize=8, color=INK2, labelpad=6)
+    cb.ax.tick_params(labelsize=8, colors=INK2, length=3, width=0.6)
+    cb.outline.set_linewidth(0.6)
+    cb.outline.set_edgecolor(INK)
+    return cb
+
+
+def _attribution(ax):
+    """The credit line the CNN-LSTM maps carry inside the axes (contextily draws it there)."""
+    ax.text(0.006, 0.010, ATTRIB, transform=ax.transAxes,
+            fontsize=4.2, color=INK2, ha="left", va="bottom", zorder=9)
+
+
 def render_snapshot(tif, path, title, vmin, vmax, pts=None, boundary=None, base=True, view_window=None):
     fig, ax = plt.subplots(figsize=(6.6, 7.4), facecolor=SURFACE)
     im = draw_panel(ax, tif, vmin, vmax, pts, boundary, base, view_window=view_window)
     ax.set_title(title, fontsize=10, color=INK, loc="left")
-    cb = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.02)
-    cb.set_label("PM$_{2.5}$ (µg/m$^3$)", fontsize=8, color=INK2)
-    cb.ax.tick_params(labelsize=7, colors=INK2)
-    fig.legend(handles=[Patch(facecolor=NO_DATA, edgecolor=INK2, linewidth=0.5, label="No data")],
-               loc="lower right", bbox_to_anchor=(0.98, 0.012), ncol=1, fontsize=7, frameon=False,
-               labelcolor=INK2)
-    fig.text(0.012, 0.012, ATTRIB, fontsize=6, color=INK2, ha="left", va="bottom")
-    fig.tight_layout(rect=(0, 0.04, 1, 1))
+    _colourbar(fig, im, ax, vmin, vmax)
+    fig.tight_layout()
     fig.savefig(path, dpi=150, facecolor=SURFACE, bbox_inches="tight")
     plt.close(fig)
     return path
@@ -279,17 +392,9 @@ def render_panels(day, folder, path, vmin, vmax, hours=HOURS, pts=None, boundary
         ax.set_title(CLOCK[hour], fontsize=10, color=INK)
     for ax in axes.ravel()[len(tifs):]:
         ax.axis("off")
-    cb = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.03, pad=0.02)
-    cb.set_label("PM$_{2.5}$ (µg/m$^3$)", fontsize=8, color=INK2)
-    cb.ax.tick_params(labelsize=7, colors=INK2)
-    fig.legend(handles=[Patch(facecolor=NO_DATA, edgecolor=INK2, linewidth=0.5, label="No data")],
-               loc="lower right", bbox_to_anchor=(0.99, 0.005), ncol=1, fontsize=7, frameon=False,
-               labelcolor=INK2)
-    fig.text(0.006, 0.004, ATTRIB, fontsize=5.5, color=INK2, ha="left", va="bottom")
-    try:
-        fig.get_layout_engine().set(rect=(0, 0.028, 1, 1))
-    except Exception:
-        pass
+    _ax = _Block(axes.ravel())
+    _colourbar(fig, im, _ax, vmin, vmax, height_frac=0.66)
+
     fig.savefig(path, dpi=150, facecolor=SURFACE, bbox_inches="tight", pad_inches=0.06)
     plt.close(fig)
     return path
@@ -303,8 +408,8 @@ def main(argv=None):
     ap.add_argument("--stations", default="data/sensor_locations.csv")
     ap.add_argument("--boundary", default="data/ncr_cities.gpkg")
     ap.add_argument("--out-dir", default="outputs/figures/exports")
-    ap.add_argument("--vmin", type=float, default=None)
-    ap.add_argument("--vmax", type=float, default=None)
+    ap.add_argument("--vmin", type=float, default=SHARED_RANGE[0])
+    ap.add_argument("--vmax", type=float, default=SHARED_RANGE[1])
     ap.add_argument("--single", action="store_true", help="one map per hour instead of a panel per day")
     ap.add_argument("--no-basemap", action="store_true")
     ap.add_argument("--no-stations", action="store_true")
