@@ -50,11 +50,12 @@ check('feature groups cover prep.features exactly',
       <= set(prep.features) | set(ARM_FEATURES['C+']))
 check('arm C is the import-time 24 columns', ARM_FEATURES['C'] == list(prep.features))
 # Was hardcoded to the pilot's 11/3/3, which fails under the shared 54/13/16 split (and under the
-# branch's own 64/12/7). Assert the shape that is valid for ANY split: non-empty, disjoint, and the
-# test partition smaller than the training one.
+# branch's own 64/12/7). Assert the shape that is valid for ANY split: train and test non-empty,
+# disjoint partitions. Calibration may be EMPTY: the plus-13 variant trains on those cells, so it
+# has no calibration set and produces no intervals.
 _tr, _ca, _te = (set(parts['train']), set(parts['calibration']), set(parts['test']))
-check('fold JSON partitions are non-empty and disjoint',
-      all([_tr, _ca, _te]) and not (_tr & _ca) and not (_tr & _te) and not (_ca & _te),
+check('fold JSON partitions are disjoint (calibration may be empty)',
+      bool(_tr) and bool(_te) and not (_tr & _ca) and not (_tr & _te) and not (_ca & _te),
       '%d/%d/%d' % (len(_tr), len(_ca), len(_te)))
 check('test partition is smaller than training',
       len(_te) < len(_tr), '%d test vs %d train' % (len(_te), len(_tr)))
