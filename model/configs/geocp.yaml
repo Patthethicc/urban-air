@@ -1,4 +1,8 @@
 # Geographically weighted conformal prediction (calibration partition only)
+enabled: true           # false = no GeoCP in `all`, `report` or `infer`: there are no calibration stations (those train the model; the test stations stay the same), `all` only writes the test predictions `report` needs, `infer` writes no
+                        #         lower / upper / width volumes, and SUMMARY.md says GeoCP was not run. `--stage geocp` and
+                        #         `--stage surface` still run GeoCP when asked for directly.
+                        #         Switch for one run: --override geocp.enabled=false
 alpha: 0.1              # miscoverage -> 90 % intervals
 score: absolute_error   # |y - y_hat| in ug/m3
 min_lower_bound: 0.0    # PM2.5 cannot be negative; clip the lower interval end

@@ -328,3 +328,39 @@ def test_the_xgboost_look_is_off_by_default_and_changes_scale_title_and_cells(nc
     aqi_maps.plt.close(fig)
     aqi_maps.render_snapshot(grid, TRANSFORM, CRS, str(tmp_path / "x.png"), "2025-07-23 12:00", ncr, None, style="continuous", caption="c")
     assert (tmp_path / "x.png").stat().st_size > 8_000
+
+
+def test_one_row_of_the_close_up_sheet_can_be_drawn_alone_without_notes(tmp_path):
+    rng = np.random.default_rng(7)
+    raw, cam = rng.random((1, 5, 32, 32)).astype("float32"), rng.random((1, 32, 32)).astype("float32")
+    names = ["building_height_mean", "building_height_stddev", "ndvi_mean", "building_density", "street_aspect_ratio_mean"]
+    plot_cam_overlays(raw, cam, names, ["HOT #1\n52.8 \u00b5g/m\u00b3"], str(tmp_path / "row.png"), 0.8, 60, px_m=10)
+    assert (tmp_path / "row.png").stat().st_size > 4_000
+    from PIL import Image
+    w, h = Image.open(tmp_path / "row.png").size
+    assert w > 2 * h                                            # one row: much wider than tall
+
+
+def test_the_xgboost_look_outlines_the_aqi_map_but_not_the_continuous_one(ncr):
+    ncr["output"]["maps"] = {**(ncr["output"].get("maps") or {}), "look": "xgboost", "continuous_range": [0, 60]}
+    cartography.reset()
+    grid = _prediction() + 20.0                                  # 28 .. 60: cells on both sides of the 35 line
+    counts = {}
+    for style in ("aqi", "continuous"):
+        fig, ax = aqi_maps.plt.subplots()
+        aqi_maps.draw_surface(ax, grid, TRANSFORM, CRS, ncr, 35, None, "t", style=style)
+        counts[style] = len(ax.collections)                      # the contour of the outline is a collection
+        aqi_maps.plt.close(fig)
+    assert counts["aqi"] > counts["continuous"]
+    assert aqi_maps.continuous_range([grid], TRANSFORM, ncr) == (0.0, 60.0)
+
+
+@pytest.mark.parametrize("lo, hi, expected", [(0, 25, [0, 5, 10, 15, 20, 25]), (12, 59, [20, 30, 40, 50]), (0, 60, [0, 10, 20, 30, 40, 50, 60])])
+def test_the_colourbar_is_numbered_every_5_on_a_narrow_scale_and_every_10_on_a_wide_one(ncr, lo, hi, expected):
+    ncr["output"]["maps"] = {**(ncr["output"].get("maps") or {}), "look": "xgboost"}
+    fig, ax = aqi_maps.plt.subplots()
+    image = ax.imshow(np.zeros((2, 2)), vmin=lo, vmax=hi)
+    cbar = fig.colorbar(image, ax=ax)
+    aqi_maps.style_colourbar(cbar, image, ncr)
+    assert [float(t.get_text()) for t in cbar.ax.get_yticklabels()] == expected
+    aqi_maps.plt.close(fig)

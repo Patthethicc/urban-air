@@ -17,7 +17,8 @@ from sklearn.model_selection import GroupKFold
 def partition_locations(location_ids, cfg: dict) -> dict[str, list]:
     """Return {'train': [...ids], 'calibration': [...], 'test': [...]}, seeded and mutually exclusive.
     Test is carved out first, then calibration from the remainder. split.test_stations /
-    calibration_stations are honoured when given."""
+    calibration_stations are honoured when given. With geocp.enabled false there is no calibration partition (the test
+    stations are the same as with GeoCP on; the calibration ones join the training stations)."""
     s = cfg["data"]["split"]
     ids = sorted(int(i) for i in set(location_ids))
     rng = np.random.default_rng(s["seed"])
@@ -34,7 +35,10 @@ def partition_locations(location_ids, cfg: dict) -> dict[str, list]:
 
     test = pick(ids, s["test_stations"], s["test_fraction"])
     development = [i for i in ids if i not in set(test)]
-    calibration = pick(development, s["calibration_stations"], s["calibration_fraction"])
+    if cfg["geocp"].get("enabled", True):
+        calibration = pick(development, s["calibration_stations"], s["calibration_fraction"])
+    else:                                                  # no GeoCP: no calibration stations, every development station trains
+        calibration = []
     train = [i for i in development if i not in set(calibration)]
 
     if len(train) < s["cv_folds"]:

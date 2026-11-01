@@ -45,6 +45,40 @@ def test_one_missing_calibration_file_is_enough_to_rerun_geocp(cfg, tmp_path, mo
     assert calls == ["RUN"]
 
 
+# ------------------------------------------------------------------------------ geocp.enabled: false
+def test_geocp_is_on_unless_switched_off(cfg):
+    assert run_pipeline._geocp_on(cfg)
+    cfg["geocp"]["enabled"] = False
+    assert not run_pipeline._geocp_on(cfg)
+
+
+def test_with_geocp_off_only_the_predictions_are_ensured(cfg, tmp_path, monkeypatch):
+    cfg = _cfg_with_snapshots(cfg, tmp_path)
+    cfg["geocp"]["enabled"] = False
+    calls = []
+    monkeypatch.setattr(run_pipeline, "geocp", lambda c, rid: calls.append(rid))
+    run_pipeline._ensure_geocp(cfg, "RUN")                                      # no predictions yet: the stage writes them
+    assert calls == ["RUN"]
+    for name in ("predictions_test.csv", "predictions_calibration.csv"):
+        (tmp_path / "snapshots" / "RUN" / name).write_text("x")
+    run_pipeline._ensure_geocp(cfg, "RUN")                                      # no calibration table is asked for
+    assert calls == ["RUN"]
+
+
+def test_surface_and_the_geocp_stage_still_run_geocp_when_switched_off(cfg, tmp_path, monkeypatch):
+    cfg["geocp"]["enabled"] = False
+    forced = run_pipeline._geocp_forced(cfg)
+    assert run_pipeline._geocp_on(forced) and not run_pipeline._geocp_on(cfg)      # the original is not changed
+    seen = []
+    monkeypatch.setattr(run_pipeline, "_ensure_geocp", lambda c, rid: seen.append(run_pipeline._geocp_on(c)))
+    monkeypatch.setattr(run_pipeline, "_load_geocp", lambda c, rid: object())
+    import uncertainty.geocp_surface as gs
+    monkeypatch.setattr(gs, "build_interval_rasters", lambda *a, **k: {})
+    cfg = _cfg_with_snapshots(cfg, tmp_path)
+    run_pipeline.surface(cfg, "RUN", "pm25.tif")
+    assert seen == [True]
+
+
 # ------------------------------------------------------------------------------ tuned values become overrides
 def test_the_tuned_overrides_rebuild_exactly_the_tuned_configuration(cfg):
     """Pasting `as_overrides` into a normal run gives the same settings as --tuned."""
@@ -119,3 +153,32 @@ def test_clean_and_its_reset_alias_are_real_stages():
     src = Path(run_pipeline.__file__).read_text(encoding="utf-8")
     choices = set(re.findall(r'"(\w+)"', re.search(r'choices=\[(.*?)\]\)', src, re.S).group(1)))
     assert {"clean", "reset"} <= choices
+
+
+def test_no_geocp_function_runs_in_the_geocp_stage_when_it_is_off(cfg, tmp_path, monkeypatch):
+    """Every GeoCP entry point raises: with geocp.enabled false the stage must only predict the test stations and write the files."""
+    import pandas as pd
+    import training.checkpoint, training.predict, uncertainty.geocp as g
+
+    cfg = _cfg_with_snapshots(cfg, tmp_path)
+    cfg["geocp"]["enabled"] = False
+    cfg["data"]["paths"]["checkpoints_dir"] = str(tmp_path / "ckpt")
+    cfg["data"]["paths"]["processed_dir"] = str(tmp_path / "processed")
+    (tmp_path / "ckpt" / "RUN").mkdir(parents=True)
+    (tmp_path / "processed").mkdir()
+    pd.DataFrame({"location_id": [1], "x": [0.0], "y": [0.0], "cell_x": [0.0], "cell_y": [0.0]}).to_csv(tmp_path / "processed" / "stations.csv", index=False)
+
+    def boom(*a, **k):
+        raise AssertionError("a GeoCP function ran with geocp.enabled false")
+    for name in ("GeoCP", "select_config", "apply_intervals", "calibration_table", "scores_from_predictions"):
+        monkeypatch.setattr(g, name, boom)
+    asked = []
+    monkeypatch.setattr(training.checkpoint, "load_model", lambda path: (object(), {}))
+    monkeypatch.setattr(training.checkpoint, "check_compatibility", lambda *a, **k: None)
+    monkeypatch.setattr(training.predict, "predict_partition", lambda m, c, part: asked.append(part) or pd.DataFrame({"location_id": [1], "y_true": [1.0], "y_pred": [1.0]}))
+    monkeypatch.setattr(run_pipeline, "_cell_stations", lambda s: s)
+    run_pipeline.geocp(cfg, "RUN")
+    snap = tmp_path / "snapshots" / "RUN"
+    assert asked == ["test"]                                                      # no calibration partition is predicted
+    assert (snap / "data" / "predictions_test.csv").exists() or (snap / "predictions_test.csv").exists()
+    assert not (snap / "data" / "calibration_table.csv").exists() and not (snap / "calibration_table.csv").exists()

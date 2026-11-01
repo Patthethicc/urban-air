@@ -311,3 +311,15 @@ def test_report_prints_the_headline_and_where_the_report_is(cfg, tmp_path, capsy
     run_pipeline.report(cfg, RUN)
     out = capsys.readouterr().out
     assert "ACCURACY on 3 test stations" in out and "UNCERTAINTY" in out and "SUMMARY.md" in out and "snapshot written to" in out
+
+
+def test_a_report_without_calibration_predictions_leaves_the_calibration_rows_out(cfg, tmp_path):
+    snap = _make_run(cfg, tmp_path, False)
+    (snap / "data" / "predictions_calibration.csv").unlink()
+    (snap / "data" / "geocp.json").write_text(json.dumps({"enabled": False}))
+    cfg["geocp"]["enabled"] = False
+    generate_snapshot(RUN, cfg)
+    summary = json.loads((snap / "metrics_summary.json").read_text(encoding="utf-8"))
+    assert set(summary["accuracy"]["measures"]) == {"cross_validation", "test"} and "calibration" not in summary
+    assert "GeoCP has not been run" in (snap / "SUMMARY.md").read_text(encoding="utf-8")
+    assert not (snap / "plots" / "geocp_coverage.png").exists()

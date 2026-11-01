@@ -92,18 +92,20 @@ def generate_snapshot(run_id: str, cfg: dict, baseline: str | None = None) -> Pa
     run_dir = Path(cfg["data"]["paths"]["checkpoints_dir"]) / run_id
     snap = Path(cfg["data"]["paths"]["snapshots_dir"]) / run_id
     test = _read(snap, "predictions_test.csv", parse_dates=["timestamp"])
-    cal = _read(snap, "predictions_calibration.csv", parse_dates=["timestamp"])
-    geocp = json.loads(snap_file(snap, "geocp.json").read_text(encoding="utf-8"))
+    cal_path = snap_file(snap, "predictions_calibration.csv")
+    cal = _read(snap, "predictions_calibration.csv", parse_dates=["timestamp"]) if cal_path.exists() and cfg["geocp"].get("enabled", True) else None   # none without GeoCP
+    geocp = json.loads(snap_file(snap, "geocp.json").read_text(encoding="utf-8")) if cfg["geocp"].get("enabled", True) else {}   # off: no intervals in the report
     info = load_run_info(run_dir)
 
     test_metrics = compute_all(test["y_true"], test["y_pred"])
-    cal_metrics = compute_all(cal["y_true"], cal["y_pred"])
+    cal_metrics = compute_all(cal["y_true"], cal["y_pred"]) if cal is not None else None
 
     measures = {}
     oof_path = run_dir / "oof_predictions.csv"
     if oof_path.exists():
         measures["cross_validation"] = accuracy.measures(pd.read_csv(oof_path, parse_dates=["timestamp"]), cfg)
-    measures["calibration"] = accuracy.measures(cal, cfg)
+    if cal is not None:
+        measures["calibration"] = accuracy.measures(cal, cfg)
     measures["test"] = accuracy.measures(test, cfg)
     by_station = accuracy.by_station(test, cfg, (geocp.get("test") or {}).get("per_station"))
     by_year = accuracy.by_year(test, cfg)
@@ -115,8 +117,8 @@ def generate_snapshot(run_id: str, cfg: dict, baseline: str | None = None) -> Pa
                 "from model fitting.",
         "test": {"rows": int(len(test)), "stations": int(test["location_id"].nunique()),
                  **split_metrics(test_metrics, cfg)},
-        "calibration": {"rows": int(len(cal)), "stations": int(cal["location_id"].nunique()),
-                        **split_metrics(cal_metrics, cfg)},
+        **({"calibration": {"rows": int(len(cal)), "stations": int(cal["location_id"].nunique()),
+                            **split_metrics(cal_metrics, cfg)}} if cal is not None else {}),
         "cv_folds": [{"fold": f["fold"], "val_stations": f.get("val_stations"),
                       **split_metrics(f["metrics"], cfg)} for f in info.get("cv", [])],
         "accuracy": {"measures": measures, "yardsticks": accuracy.persistence_reference(test, cfg), "by_station": by_station,
@@ -157,7 +159,7 @@ def generate_snapshot(run_id: str, cfg: dict, baseline: str | None = None) -> Pa
         plotters.plot_accuracy_by_station(by_station, measures["test"]["rmse"],
                                           str(snap_file(snap, "accuracy_by_station.png", write=True)))
 
-    sections = {"test_metrics": test_metrics, "calibration_metrics": cal_metrics,
+    sections = {"test_metrics": test_metrics, **({"calibration_metrics": cal_metrics} if cal is not None else {}),
                 "accuracy": {k: {m: v for m, v in d.items() if not isinstance(v, str)} for k, d in measures.items()}}
     if baseline:
         sections["comparison_to_baseline"] = summary["comparison_to_baseline"]

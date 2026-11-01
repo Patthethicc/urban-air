@@ -358,7 +358,7 @@ lowest-predicted cells (output.yaml explain.top_n / bottom_n, ranked inside the 
 gradcam_hot_cells.png and gradcam_cold_cells.png (every morphology band with the attended region outlined), gradcam_map.png (where those cells
 are, numbered, on the predicted map), gradcam_band_profile.png (hot against cold, per band), morphology_sheet.png (the five bands mapped
 over the NCR), gradcam_attention.csv
-and gradcam_summary.json (and, for the high and the low end of every band over the NCR, the feature_groups/ folder: groups set by
+and gradcam_summary.json (plus the SHAP-style gradcam_band_swarm.png / gradcam_band_importance.png / gradcam_band_swarm.csv over a sample of NCR cells: one dot per cell, one row per band, x = attention score, colour = the band's patch mean) (and, for the high and the low end of every band over the NCR, the feature_groups/ folder: groups set by
 the raster percentiles, hot and cold picked by prediction inside each group; an association, not a what-if): for each band, how many patch standard deviations higher the attended pixels
 are than the rest of the patch (explain.attention_quantile = top 20 %). Positive values for building
 density, aspect ratio, height or street width point at dense blocks, canyons and arterials; the overlays

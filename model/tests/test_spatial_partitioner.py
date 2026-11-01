@@ -43,3 +43,12 @@ def test_explicit_station_lists_override_fractions(cfg):
     part = partition_locations(_ids(), cfg)
     assert part["test"] == [100, 101] and part["calibration"] == [102]
     assert not {100, 101, 102} & set(part["train"])
+
+
+def test_with_geocp_off_there_is_no_calibration_partition_and_the_test_stations_stay_the_same(cfg):
+    on = partition_locations(_ids(), cfg)
+    cfg["geocp"]["enabled"] = False
+    off = partition_locations(_ids(), cfg)
+    assert off["calibration"] == []
+    assert off["test"] == on["test"]                                         # the same test stations, so the runs compare
+    assert off["train"] == sorted(on["train"] + on["calibration"])           # the calibration stations now train

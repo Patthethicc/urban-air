@@ -67,10 +67,28 @@ def _load_geocp(cfg: dict, run_id: str):
                  selected["finite_sample_correction"]).fit(table[["location_id", "score"]], stations)
 
 
+def _geocp_on(cfg: dict) -> bool:
+    """geocp.enabled (default true). False = no GeoCP in `all`, `report` or `infer`: there is no calibration partition, the geocp stage inside
+    `all` only writes the test predictions that `report` reads, and `infer` writes the prediction volume without lower / upper / width.
+    `--stage geocp` and `--stage surface` still run it when asked for directly (see _geocp_forced)."""
+    return bool(cfg["geocp"].get("enabled", True))
+
+
+def _geocp_forced(cfg: dict) -> dict:
+    """cfg with GeoCP on, for the stages whose whole job is GeoCP (--stage geocp, --stage surface): geocp.enabled only switches off
+    the GeoCP that the other stages (all, report, infer) would add on their own."""
+    return {**cfg, "geocp": {**cfg["geocp"], "enabled": True}}
+
+
 def _ensure_geocp(cfg: dict, run_id: str) -> None:
     """The interval rasters need the GeoCP calibration of the run (calibration_table.csv + geocp.json), which only the
-    geocp stage writes. Run it now when it is missing, as `report` does, instead of failing on a missing file."""
+    geocp stage writes. Run it now when it is missing, as `report` does, instead of failing on a missing file.
+    With geocp.enabled false only the predictions `report` reads are needed, and no calibration is made."""
     snap = Path(_paths(cfg)["snapshots_dir"]) / run_id
+    if not _geocp_on(cfg):
+        if not snap_file(snap, "predictions_test.csv").exists():
+            geocp(cfg, run_id)
+        return
     if not (snap_file(snap, "geocp.json").exists() and snap_file(snap, "calibration_table.csv").exists()):
         print(f"no GeoCP calibration found for run {run_id}: running --stage geocp first "
               "(it calibrates the prediction intervals)")
@@ -201,7 +219,7 @@ def preprocess(cfg: dict) -> None:
     patches = extract_patches(_paths(cfg)["master_raster"], stations, cfg)
     patch_arr, patch_index = stack_patches(patches)
     rows = partition_indices(meta, partition)
-    empty = [k for k, v in rows.items() if len(v) == 0]
+    empty = [k for k, v in rows.items() if len(v) == 0 and not (k == "calibration" and not _geocp_on(cfg))]
     if empty:
         raise ValueError(f"partitions with no windows: {empty}")
 
@@ -348,8 +366,6 @@ def geocp(cfg: dict, run_id: str | None) -> str:
     from training.checkpoint import check_compatibility, load_model
     from training.predict import predict_partition
     from training.run_info import update_run_info, update_runs_index, write_json
-    from uncertainty.geocp import (GeoCP, apply_intervals, calibration_table, scores_from_predictions,
-                                   select_config)
 
     run_id = run_id or latest_run_id(cfg)
     run_dir = Path(_paths(cfg)["checkpoints_dir"]) / run_id
@@ -359,9 +375,17 @@ def geocp(cfg: dict, run_id: str | None) -> str:
 
     model, ckpt = load_model(str(run_dir / MODEL_FILE))
     check_compatibility(ckpt, _paths(cfg)["processed_dir"])            # same patches, bands, lags, scalers as training
-    stations = _cell_stations(pd.read_csv(Path(_paths(cfg)["processed_dir"]) / "stations.csv"))
 
+    if not _geocp_on(cfg):                                              # geocp.enabled: false -> test predictions only, no calibration, no intervals
+        test = predict_partition(model, cfg, "test")
+        test.to_csv(snap_file(snap, "predictions_test.csv", write=True), index=False)
+        write_json(snap_file(snap, "geocp.json", write=True), {"enabled": False, "note": "geocp.enabled is false: no GeoCP calibration or intervals"})
+        print("GeoCP is switched off (geocp.enabled: false): predictions written, no intervals")
+        return run_id
+    stations = _cell_stations(pd.read_csv(Path(_paths(cfg)["processed_dir"]) / "stations.csv"))
     cal = predict_partition(model, cfg, "calibration")
+    from uncertainty.geocp import (GeoCP, apply_intervals, calibration_table, scores_from_predictions,
+                                   select_config)
     scores = scores_from_predictions(cal)
     best, table = select_config(scores, stations, gcfg)               # calibration stations only
     print(f"GeoCP config: {best}")
@@ -416,6 +440,7 @@ def surface(cfg: dict, run_id: str | None, prediction_raster: str) -> str:
     """Per-cell GeoCP interval rasters (prediction, lower, upper, width) for ANY point-prediction raster."""
     from uncertainty.geocp_surface import build_interval_rasters
 
+    cfg = _geocp_forced(cfg)                                  # this stage IS the GeoCP intervals: it runs even when geocp.enabled is false
     run_id = run_id or latest_run_id(cfg)
     _ensure_geocp(cfg, run_id)
     snap = Path(_paths(cfg)["snapshots_dir"]) / run_id
@@ -477,11 +502,13 @@ def infer(cfg: dict, run_id: str | None, timestamps: list[str], dates: list[str]
     if not stamps:
         raise SystemExit("--stage infer needs --date 2025-07-01 or at least one --timestamp '2025-07-01 12:00'")
     run_id = run_id or latest_run_id(cfg)
-    _ensure_geocp(cfg, run_id)
+    with_intervals = _geocp_on(cfg)
+    if with_intervals:
+        _ensure_geocp(cfg, run_id)
     ctx = _inference_context(cfg, run_id)
     for ts in stamps:                                         # a date without readings behind it stops here, before any folder is made
         _hour_index(ts, ctx["hourly"], cfg)
-    geocp_engine = _load_geocp(cfg, run_id)
+    geocp_engine = _load_geocp(cfg, run_id) if with_intervals else None
     o = cfg["output"]
     reset_basemap_state()
 
@@ -499,8 +526,13 @@ def infer(cfg: dict, run_id: str | None, timestamps: list[str], dates: list[str]
         preds, tr = predict_surface(ctx["model"], ctx["scalers"], ctx["padded"], ctx["shape"], ctx["transform"],
                                     ctx["hourly"], ctx["ref_ids"], ctx["ref_xy"], group, cfg, ctx["device"])
         # one pass over the raster for all hours; the interval layers are written in place (no per-hour lists + copies)
-        stack = {"prediction": preds, **{k: np.empty_like(preds) for k in ("lower", "upper", "width")}}
+        stack = {"prediction": preds}
+        if with_intervals:
+            stack.update({k: np.empty_like(preds) for k in ("lower", "upper", "width")})
         for i, (ts, pred) in enumerate(zip(group, preds)):
+            if not with_intervals:
+                print(f"{ts}: {int(np.isfinite(pred).sum())} cells, mean {np.nanmean(pred):.1f} ug/m3")
+                continue
             lo, hi, w = interval_layers(pred, tr, geocp_engine, cfg["geocp"]["min_lower_bound"])
             stack["lower"][i], stack["upper"][i], stack["width"][i] = lo, hi, w
             print(f"{ts}: {int(np.isfinite(pred).sum())} cells, mean {np.nanmean(pred):.1f} ug/m3, "
@@ -522,7 +554,7 @@ def infer(cfg: dict, run_id: str | None, timestamps: list[str], dates: list[str]
                    f"{ctx['crs']}; city boundaries: GADM 4.1." + (" Every cell's history comes from OpenAQ stations only." if only else ""))
         render_day(stack["prediction"], labels, tr, ctx["crs"], out_dir / "maps", date, cfg, sensors, caption, mean)
         from output.aqi_maps import last_basemap
-        summary = summarize_date(group, stack["prediction"], stack["width"], cfg)
+        summary = summarize_date(group, stack["prediction"], stack.get("width", np.full_like(stack["prediction"], np.nan)), cfg)
         summary["lag_stations"] = "OpenAQ only" if only else "all reference stations"
         for snap, pred in zip(summary["snapshots"], stack["prediction"]):          # cells and coverage as printed in the map titles
             st = cartography.grid_stats(pred, tr, cfg)
@@ -545,7 +577,7 @@ def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
     import rasterio
     from rasterio.transform import rowcol, xy as cell_xy_of
 
-    from explain import feature_groups
+    from explain import band_ablation, band_swarm, feature_groups
     from explain.gradcam import attention_profile, grad_cam, spread_selection
     from explain.gradcam_map import plot_gradcam_map
     from explain.gradcam_plots import plot_band_profile, plot_cam_overlays
@@ -606,18 +638,31 @@ def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
     cells = []
     rows, summary = [], {"timestamp": str(ts), "patch_px": px, "attention_quantile": ex["attention_quantile"], "groups": {},
                          "ranked_inside_ncr": boundary is not None}
-    def explain_cells(xs, ys):
-        """Grad-CAM for the cells at (xs, ys): (raw patches, cam, predictions, mask of the cells kept: those with a full history)."""
+    def cell_inputs(xs, ys):
+        """The model's inputs for the cells at (xs, ys): (raw patches, temporal features, mask of the cells kept: those with a full history)."""
         xs, ys = np.asarray(xs, dtype="float64"), np.asarray(ys, dtype="float64")
         r_pix, c_pix = (np.asarray(v) for v in rowcol(ctx["transform"], xs, ys))
         raw = gather_patches(ctx["padded"], r_pix, c_pix, px)
         feats = cell_temporal_features(ctx["hourly"]["values"], ctx["hourly"]["location_ids"], ref_ids, ref_xy,
                                        np.column_stack([xs, ys]), t_idx, ts, cfg)
         keep = ~np.isnan(feats).any(axis=(1, 2))
-        raw, feats = raw[keep], feats[keep]
+        return raw[keep], feats[keep], keep
+
+    def explain_cells(xs, ys):
+        """Grad-CAM for the cells at (xs, ys): (raw patches, cam, predictions, mask of the cells kept: those with a full history)."""
+        raw, feats, keep = cell_inputs(xs, ys)
         cam, p_scaled = grad_cam(ctx["model"], ctx["scalers"].transform_patches(raw),
                                  ctx["scalers"].transform_temporal(feats), ctx["device"])
         return raw, cam, ctx["scalers"].inverse_y(p_scaled).ravel(), keep
+
+    def predict_cells(raw, feats):
+        """The prediction in ug/m3 for raw patches and temporal features (no gradients): used to swap one band and look again."""
+        import torch
+        model = ctx["model"].to(ctx["device"]).eval()
+        with torch.no_grad():
+            out = model(torch.from_numpy(np.ascontiguousarray(ctx["scalers"].transform_patches(raw))).to(ctx["device"]),
+                        torch.from_numpy(np.ascontiguousarray(ctx["scalers"].transform_temporal(feats))).to(ctx["device"]))
+        return ctx["scalers"].inverse_y(out.detach().cpu().numpy()).ravel()
 
     for group, flat in groups.items():
         r_out, c_out = np.unravel_index(flat, pred_map.shape)
@@ -635,6 +680,10 @@ def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
         plot_cam_overlays(raw, cam, names, titles, str(out_dir / f"gradcam_{group}_cells.png"), ex["attention_quantile"],
                           cfg["output"]["dpi"], cfg=cfg, px_m=res, caption=caption,
                           heading=f"Grad-CAM, {group} cells of {ts:%Y-%m-%d %H:%M}")
+        k = int(ex.get("example_cell", 1)) - 1                  # one row of the sheet on its own (no notes), for a paper figure
+        if 0 <= k < len(cam):
+            plot_cam_overlays(raw[k:k + 1], cam[k:k + 1], names, titles[k:k + 1], str(out_dir / f"gradcam_{group}_row.png"),
+                              ex["attention_quantile"], cfg["output"]["dpi"], px_m=res)
         by_band = pd.DataFrame([r for r in prof]).groupby("band")["std_units"].mean() if prof else pd.Series(dtype=float)
         summary["groups"][group] = {"cells": int(len(cam)), "mean_prediction": float(pred.mean()),
                                     "attention_std_units_by_band": {k: float(v) for k, v in by_band.items()}}
@@ -648,6 +697,20 @@ def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
                      f"PM2.5 prediction, {ts:%Y-%m-%d %H:%M}", stations=ctx["stations"], caption=caption, dpi=dpi)
     plot_morphology_sheet(_paths(cfg)["master_raster"], cfg, cells, str(out_dir / "morphology_sheet.png"), names,
                           stations=ctx["stations"], caption=caption, dpi=dpi)
+    bs = band_swarm.settings(cfg)
+    if bs["enabled"]:                                         # the SHAP-style beeswarm of the Grad-CAM band scores over many NCR cells
+        summary["band_swarm"] = band_swarm.run(cfg, pred_map=pred_map, transform=vol_transform, ok=ok, names=names, explain_cells=explain_cells,
+                                               out_dir=out_dir, ts=ts, caption=caption, dpi=dpi)
+    ba = band_ablation.settings(cfg)
+    if ba["enabled"]:                                         # the impact counterpart: swap one band at a time and see how far the prediction moves
+        summary["band_ablation"] = band_ablation.run(cfg, ok=ok, transform=vol_transform, names=names, cell_inputs=cell_inputs,
+                                                     predict=predict_cells, out_dir=out_dir, ts=ts, dpi=dpi)
+        both = [summary.get("band_swarm", {}), summary["band_ablation"]]
+        if all("bands" in b for b in both):                   # do attention and impact rank the bands alike?
+            from scipy.stats import spearmanr
+            a, b = (np.array([r["mean_abs_score"] for r in x["bands"]]) for x in both)
+            rho = float(spearmanr(a, b)[0]) if len(a) > 2 else None
+            summary["band_attention_vs_impact"] = {"spearman": rho, "attention_order": both[0]["order"], "impact_order": both[1]["order"]}
     fg = feature_groups.settings(cfg)
     if fg["enabled"]:
         summary["feature_groups"] = feature_groups.run(
@@ -773,7 +836,7 @@ def run(cfg: dict, args) -> None:
     if stage in ("train", "all"):
         run_id = train(cfg)
     if stage in ("geocp", "all"):
-        geocp(cfg, run_id)
+        geocp(_geocp_forced(cfg) if stage == "geocp" else cfg, run_id)
     if stage == "bias":
         bias(cfg, run_id)
     if stage == "surface":

@@ -71,10 +71,10 @@ def display_grid(values: np.ndarray, cfg: dict) -> np.ndarray:
     return up
 
 
-def _outline_on(cfg: dict) -> bool:
+def _outline_on(cfg: dict, style: str = "aqi") -> bool:
     """The black line between 'below' and 'above' the threshold is an option, off by default (always on in the XGBoost look, whose
     AQI map outlines the cells above 35)."""
-    return bool(cfg["output"].get("outline_above_threshold", False)) or xgboost_look(cfg)
+    return bool(cfg["output"].get("outline_above_threshold", False)) or (xgboost_look(cfg) and style == "aqi")
 
 
 def _legend_entries(cfg: dict, threshold, threshold_label: str):
@@ -362,12 +362,14 @@ def xgboost_look(cfg: dict, style: str | None = None) -> bool:
 
 
 def style_colourbar(cbar, image, cfg: dict) -> None:
-    """XGBoost look: colourbar numbers every 5 ug/m3 inside the scale (0, 5, 10, 15, 20 on a 0-24 scale), as on the XGBoost maps.
+    """XGBoost look: colourbar numbers every 5 ug/m3 inside a narrow scale (0, 5, 10, 15, 20 on a 0-24 scale), every 10 on a wide one
+    (20, 30, 40, 50 on a 12-59 scale), as on the XGBoost maps.
     Too short a scale for two ticks keeps the automatic ones."""
     if not xgboost_look(cfg):
         return
     vmin, vmax = image.norm.vmin, image.norm.vmax
-    ticks = np.arange(np.ceil(vmin / 5.0) * 5.0, vmax + 1e-9, 5.0)
+    step = 10.0 if vmax - vmin > 30 else 5.0                  # a wide scale is numbered every 10 (20, 30, 40, 50), a narrow one every 5
+    ticks = np.arange(np.ceil(vmin / step) * step, vmax + 1e-9, step)
     if len(ticks) >= 2:
         cbar.set_ticks(ticks)
         cbar.set_ticklabels([f"{t:g}" for t in ticks])
@@ -425,7 +427,7 @@ def draw_surface(ax, values: np.ndarray, transform, crs, cfg: dict, threshold=No
         image = ax.imshow(np.ma.masked_invalid(shown), extent=extent, origin="upper", cmap=cmap, vmin=vmin, vmax=vmax,
                           interpolation="nearest", alpha=alpha, zorder=2)
 
-    if threshold is not None and _outline_on(cfg):
+    if threshold is not None and _outline_on(cfg, style):
         above = np.where(np.isfinite(shown), shown > threshold, False)
         if above.any() and not above.all():
             xs = left + (np.arange(shown.shape[1]) + 0.5) * (right - left) / shown.shape[1]
@@ -470,8 +472,8 @@ def _notes(style: str, cfg: dict | None = None) -> list[str]:
     note = NOTE_CONTINUOUS
     fixed = cartography.settings(cfg)["continuous_range"] if cfg is not None else "auto"
     if style != "aqi" and fixed != "auto":
-        note = (f"Continuous colour scale, fixed at {float(fixed[0]):g} to {float(fixed[1]):g} µg/m³ and shared by every map "
-                "(and by the XGBoost maps), so colours compare directly; values beyond are shown in the end colours.")
+        note = (f"Continuous colour scale, fixed at {float(fixed[0]):g} to {float(fixed[1]):g} µg/m³ and the same on every map made with this "
+                "setting, so colours compare directly; values beyond are shown in the end colours.")
     return [NOTE_PM25, NOTE_HISTORY, NOTE_AQI if style == "aqi" else note]
 
 
@@ -507,6 +509,8 @@ def render_panels(stack, labels: list[str], transform, crs, path: str, title: st
     n = len(stack)
     ncols = 2 if n > 1 else 1
     nrows = int(np.ceil(n / ncols))
+    if style == "continuous" and xgboost_look(cfg, style) and n > 1:
+        return _render_panels_compact(stack, labels, transform, crs, path, cfg, threshold, stations, vrange, nrows, ncols)
     fig, axes = plt.subplots(nrows, ncols, figsize=(5.0 * ncols + (1.0 if style == "continuous" else 0), 6.0 * nrows + 0.9),
                              facecolor=SURFACE, squeeze=False)
     if style == "continuous" and vrange is None:
@@ -534,7 +538,53 @@ def render_panels(stack, labels: list[str], transform, crs, path: str, title: st
     return path
 
 
-FILE_STEMS = {"aqi": ("aqi_{h}", "daily_panels", "daily_mean"),                       # file stems per style (the AQI names are the old ones)
+def _render_panels_compact(stack, labels, transform, crs, path, cfg, threshold, stations, vrange, nrows, ncols) -> str:
+    """The compact panel: only the time as each title, northing on the left column and easting on the bottom row,
+    tight gaps, no footer, and one tall colourbar on the right."""
+    n = len(stack)
+    vrange = vrange if vrange is not None else continuous_range(stack, transform, cfg)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6.4, 4.4 * nrows), facecolor=SURFACE, squeeze=False)
+    fig.subplots_adjust(left=0.15, right=0.87, top=0.965, bottom=0.075, wspace=0.1, hspace=0.1)
+    image = None
+    for i, ax in enumerate(axes.ravel()):
+        if i >= n:
+            ax.axis("off")
+            continue
+        ax.set_facecolor(SURFACE)
+        image = draw_surface(ax, stack[i], transform, crs, cfg, threshold, _stations(cfg, stations), None, style="continuous", vrange=vrange)
+        ax.set_title(labels[i], color=INK, fontsize=11, pad=4)
+        for side in ax.spines.values():                          # full thin frame round every panel
+            side.set_visible(True)
+            side.set_linewidth(1.5)
+            side.set_edgecolor("black")
+        ax.tick_params(labelsize=7, labelcolor="black", color="black", width=1.0)
+        ax.xaxis.label.set_color("black")
+        ax.yaxis.label.set_color("black")
+        for t in ax.texts:                                       # the tile credit: small
+            if t.get_text().startswith("(C)"):
+                t.set_fontsize(5.5)
+        r, c = divmod(i, ncols)
+        if c:
+            ax.set_ylabel("")
+            ax.tick_params(labelleft=False)
+        if r < nrows - 1 and i + ncols < n:
+            ax.set_xlabel("")
+            ax.tick_params(labelbottom=False)
+    top, bottom = axes[0, 0].get_position().y1, axes[-1, 0].get_position().y0
+    cax = fig.add_axes([0.9, bottom + 0.14 * (top - bottom), 0.026, 0.70 * (top - bottom)])
+    cbar = fig.colorbar(image, cax=cax)
+    cbar.set_label(UNIT, color=INK2, fontsize=7)
+    style_colourbar(cbar, image, cfg)
+    cbar.outline.set_linewidth(1.0)
+    cbar.outline.set_edgecolor("black")
+    cbar.ax.tick_params(labelsize=7, labelcolor="black", color="black")
+    cbar.set_label(UNIT, color="black", fontsize=7)
+    fig.savefig(path, dpi=cfg["output"]["dpi"], facecolor=SURFACE)
+    plt.close(fig)
+    return path
+
+
+FILE_STEMS = {"aqi":("aqi_{h}", "daily_panels", "daily_mean"),                       # file stems per style (the AQI names are the old ones)
               "continuous": ("continuous_{h}", "continuous_panels", "continuous_daily_mean")}
 
 
