@@ -182,3 +182,27 @@ def test_no_geocp_function_runs_in_the_geocp_stage_when_it_is_off(cfg, tmp_path,
     assert asked == ["test"]                                                      # no calibration partition is predicted
     assert (snap / "data" / "predictions_test.csv").exists() or (snap / "predictions_test.csv").exists()
     assert not (snap / "data" / "calibration_table.csv").exists() and not (snap / "calibration_table.csv").exists()
+
+
+# ------------------------------------------------------------------------------ train.resume
+def test_a_stopped_run_is_found_and_a_finished_one_is_not(cfg, tmp_path):
+    import json
+    cfg["data"]["paths"]["checkpoints_dir"] = str(tmp_path)
+    for name, status, model in (("20260101_000000", "completed", True), ("20260102_000000", "timed_out", False), ("20260103_000000", "running", False)):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "run_info.json").write_text(json.dumps({"status": status}))
+        if model:
+            (tmp_path / name / run_pipeline.MODEL_FILE).write_text("x")
+    assert run_pipeline._unfinished_run(cfg) == "20260103_000000"                 # the newest stopped one
+    (tmp_path / "20260103_000000" / run_pipeline.MODEL_FILE).write_text("x")      # finished after all
+    assert run_pipeline._unfinished_run(cfg) == "20260102_000000"
+
+
+def test_a_finished_fold_is_saved_and_loaded_back(tmp_path):
+    import pandas as pd
+    oof = pd.DataFrame({"location_id": [1, 2], "timestamp": pd.to_datetime(["2025-01-01 00:00", "2025-01-01 01:00"]), "fold": 0,
+                        "y_true": [1.0, 2.0], "y_pred": [1.5, 2.5]})
+    run_pipeline._save_fold(tmp_path, 0, {"best_epoch": 3, "epochs_run": 5}, {"fold": 0, "metrics": {"rmse": 4.0, "r2": 0.7}}, oof)
+    hist, entry, back = run_pipeline._load_fold(tmp_path, 0)
+    assert hist["best_epoch"] == 3 and entry["metrics"]["r2"] == 0.7 and back["y_pred"].tolist() == [1.5, 2.5]
+    assert run_pipeline._load_fold(tmp_path, 1) is None                            # a fold that never finished

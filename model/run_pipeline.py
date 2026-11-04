@@ -265,6 +265,36 @@ def tune(cfg: dict) -> str:
     return str(nested_tuning(cfg))
 
 
+def _unfinished_run(cfg: dict) -> str | None:
+    """The newest training run that was stopped before it finished (status running / timed_out, no final model), or None."""
+    best = None
+    for info_path in sorted(Path(_paths(cfg)["checkpoints_dir"]).glob("*/run_info.json")):
+        if (info_path.parent / MODEL_FILE).exists():
+            continue
+        try:
+            status = json.loads(info_path.read_text(encoding="utf-8")).get("status")
+        except (OSError, ValueError):
+            continue
+        if status in ("running", "timed_out"):
+            best = info_path.parent.name
+    return best
+
+
+def _save_fold(run_dir: Path, k: int, hist: dict, entry: dict, oof: pd.DataFrame) -> None:
+    from training.run_info import write_json
+    oof.to_csv(run_dir / f"fold_{k}_oof.csv", index=False)
+    write_json(run_dir / f"fold_{k}_result.json", {"history": hist, "cv": entry})
+
+
+def _load_fold(run_dir: Path, k: int):
+    """(history, cv entry, out-of-fold frame) of a fold that finished earlier, or None."""
+    result, oof = run_dir / f"fold_{k}_result.json", run_dir / f"fold_{k}_oof.csv"
+    if not (result.is_file() and oof.is_file()):
+        return None
+    saved = json.loads(result.read_text(encoding="utf-8"))
+    return saved["history"], saved["cv"], pd.read_csv(oof, parse_dates=["timestamp"])
+
+
 def train(cfg: dict) -> str:
     """Spatial CV on the training stations (fold best epochs set the final epoch count), then one final
     fit on ALL training stations. Saves best_dual_branch_model.pt, history.json and run_info.json.
@@ -285,9 +315,12 @@ def train(cfg: dict) -> str:
     if not (Path(processed) / "scalers.json").is_file():
         raise SystemExit(f"nothing to train on: {processed} has no preprocessed data. Run `--stage preprocess` first, "
                          "with the same --override settings (data paths, split, cv_assignment) as this command.")
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    unfinished = _unfinished_run(cfg) if tc.get("resume") else None          # train.resume: continue a run that was stopped (time budget, Kaggle limit)
+    run_id = unfinished or datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path(_paths(cfg)["checkpoints_dir"]) / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    if unfinished:
+        print(f"resuming run {run_id}: the folds that finished are kept")
 
     scalers = Scalers.load(str(Path(processed) / "scalers.json"))
     data_summary = json.loads((Path(processed) / "preprocess_info.json").read_text(encoding="utf-8"))
@@ -300,6 +333,9 @@ def train(cfg: dict) -> str:
 
     set_seed(tc["seed"])
     info = new_run_info(run_id, cfg, DualBranchNet(mc), data_summary)
+    if unfinished and (run_dir / "run_info.json").is_file():
+        info["created"] = json.loads((run_dir / "run_info.json").read_text(encoding="utf-8")).get("created", info["created"])
+    info.pop("timeout", None)
     info["status"] = "running"                    # completed / timed_out replace it; still "running" = killed from outside
     save_run_info(run_dir, info)
     history = {"folds": [], "final": None}
@@ -312,6 +348,15 @@ def train(cfg: dict) -> str:
     best_epochs, oof_parts = [], []
     if tc["cv"]["enabled"]:
         for k, (fit_idx, val_idx) in enumerate(spatial_cv_folds(meta_train, cfg["data"]["split"]["cv_folds"], **fold_settings(cfg))):
+            done = _load_fold(run_dir, k) if unfinished else None
+            if done is not None:                                     # this fold finished before the run was stopped
+                hist, entry, oof = done
+                best_epochs.append(hist["best_epoch"])
+                history["folds"].append(hist)
+                info["cv"].append(entry)
+                oof_parts.append(oof)
+                print(f"[fold {k}] already finished (RMSE {entry['metrics']['rmse']:.3f}, R2 {entry['metrics']['r2']:.3f}), skipped")
+                continue
             set_seed(tc["seed"] + k + 1)
             fold_ds, fit_idx, val_idx = recomputer.apply(train_ds, fit_idx, val_idx)   # lag from fit stations only
             fit_ds, val_ds = Subset(fold_ds, fit_idx), Subset(fold_ds, val_idx)
@@ -332,6 +377,7 @@ def train(cfg: dict) -> str:
                 "best_val_loss": hist["best_val_loss"], "metrics": metrics,
             })
             print(f"[fold {k}] held-out stations RMSE {metrics['rmse']:.3f}  MAE {metrics['mae']:.3f}  R2 {metrics['r2']:.3f}")
+            _save_fold(run_dir, k, hist, info["cv"][-1], oof_parts[-1])      # so a stopped run can continue from here
 
     if oof_parts:                                  # out-of-fold predictions: the spatial-bias analysis reads these
         pd.concat(oof_parts, ignore_index=True).to_csv(run_dir / "oof_predictions.csv", index=False)
@@ -570,6 +616,64 @@ def infer(cfg: dict, run_id: str | None, timestamps: list[str], dates: list[str]
     return written
 
 
+def _hot_cold_cells(cfg: dict, pred_map: np.ndarray, transform, ok: np.ndarray) -> dict:
+    """{'hot': flat cell indices, 'cold': ...}: the highest and the lowest predicted cells of `pred_map` among the cells in `ok`, each at least
+    output.explain.min_separation_m from the others of its group."""
+    from rasterio.transform import xy as cell_xy_of
+
+    from explain.gradcam import spread_selection
+
+    ex = cfg["output"]["explain"]
+    valid = np.flatnonzero(ok.ravel())
+    order = valid[np.argsort(pred_map.ravel()[valid])]
+
+    def pick(best_first, n):                                  # the n best cells that are at least min_separation_m apart
+        flat = best_first[:20000]
+        px_, py_ = cell_xy_of(transform, *np.unravel_index(flat, pred_map.shape), offset="center")
+        return flat[spread_selection(np.asarray(px_), np.asarray(py_), n, float(ex.get("min_separation_m", 0)))]
+
+    return {"hot": pick(order[::-1], int(ex["top_n"])), "cold": pick(order, int(ex["bottom_n"]))}
+
+
+def _cell_functions(cfg: dict, ctx: dict, ts, px: int):
+    """(cell_inputs, explain_cells, predict_cells) for the cells of the snapshot `ts`: the model's inputs, Grad-CAM, and a plain prediction."""
+    from rasterio.transform import rowcol
+
+    from explain.gradcam import grad_cam
+    from inference.cell_inference import cell_temporal_features, gather_patches, openaq_only, reference_stations
+
+    t_idx = int(round((ts - ctx["hourly"]["start"]) / pd.Timedelta(cfg["data"]["time"]["freq"])))
+    ref_ids, ref_xy = reference_stations(ctx["ref_ids"], ctx["ref_xy"], openaq_only(ts, cfg), cfg)    # the same rule as `infer`
+
+    def cell_inputs(xs, ys):
+        """The model's inputs for the cells at (xs, ys): (raw patches, temporal features, mask of the cells kept: those with a full history)."""
+        xs, ys = np.asarray(xs, dtype="float64"), np.asarray(ys, dtype="float64")
+        r_pix, c_pix = (np.asarray(v) for v in rowcol(ctx["transform"], xs, ys))
+        raw = gather_patches(ctx["padded"], r_pix, c_pix, px)
+        feats = cell_temporal_features(ctx["hourly"]["values"], ctx["hourly"]["location_ids"], ref_ids, ref_xy,
+                                       np.column_stack([xs, ys]), t_idx, ts, cfg)
+        keep = ~np.isnan(feats).any(axis=(1, 2))
+        return raw[keep], feats[keep], keep
+
+    def explain_cells(xs, ys):
+        """Grad-CAM for the cells at (xs, ys): (raw patches, cam, predictions, mask of the cells kept: those with a full history)."""
+        raw, feats, keep = cell_inputs(xs, ys)
+        cam, p_scaled = grad_cam(ctx["model"], ctx["scalers"].transform_patches(raw),
+                                 ctx["scalers"].transform_temporal(feats), ctx["device"])
+        return raw, cam, ctx["scalers"].inverse_y(p_scaled).ravel(), keep
+
+    def predict_cells(raw, feats):
+        """The prediction in ug/m3 for raw patches and temporal features (no gradients): used to swap one band and look again."""
+        import torch
+        model = ctx["model"].to(ctx["device"]).eval()
+        with torch.no_grad():
+            out = model(torch.from_numpy(np.ascontiguousarray(ctx["scalers"].transform_patches(raw))).to(ctx["device"]),
+                        torch.from_numpy(np.ascontiguousarray(ctx["scalers"].transform_temporal(feats))).to(ctx["device"]))
+        return ctx["scalers"].inverse_y(out.detach().cpu().numpy()).ravel()
+
+    return cell_inputs, explain_cells, predict_cells
+
+
 def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
     """Grad-CAM (Output.txt): for the highest- and lowest-predicted cells of one inferred snapshot, which pixels
     of the morphology patch drove the CNN branch. Writes overlays, gradcam_attention.csv and a summary to
@@ -617,19 +721,9 @@ def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
     ok = np.isfinite(pred_map)
     if boundary is not None:                                  # hot and cold are ranked inside the NCR, not in the sea or the next provinces
         ok &= cartography.inside_mask(vol_transform, pred_map.shape, boundary)
-    valid = np.flatnonzero(ok.ravel())
-    order = valid[np.argsort(pred_map.ravel()[valid])]
 
-    def pick(best_first, n):                                  # the n best cells that are at least min_separation_m apart
-        flat = best_first[:20000]
-        px_, py_ = cell_xy_of(vol_transform, *np.unravel_index(flat, pred_map.shape), offset="center")
-        return flat[spread_selection(np.asarray(px_), np.asarray(py_), n, float(ex.get("min_separation_m", 0)))]
-
-    groups = {"hot": pick(order[::-1], int(ex["top_n"])), "cold": pick(order, int(ex["bottom_n"]))}
+    groups = _hot_cold_cells(cfg, pred_map, vol_transform, ok)
     names = band_names_for(_paths(cfg)["master_raster"], cfg)
-    t_idx = int(round((ts - ctx["hourly"]["start"]) / pd.Timedelta(cfg["data"]["time"]["freq"])))
-
-    ref_ids, ref_xy = reference_stations(ctx["ref_ids"], ctx["ref_xy"], openaq_only(ts, cfg), cfg)    # the same rule as `infer`
 
     res = cfg["derived"]["raster_resolution_m"]
     caption = (f"{ts:%Y-%m-%d %H:%M}, run {run_id}; prediction cells of {abs(vol_transform.a):g} m, morphology patches of {px * res:g} m; "
@@ -638,31 +732,7 @@ def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
     cells = []
     rows, summary = [], {"timestamp": str(ts), "patch_px": px, "attention_quantile": ex["attention_quantile"], "groups": {},
                          "ranked_inside_ncr": boundary is not None}
-    def cell_inputs(xs, ys):
-        """The model's inputs for the cells at (xs, ys): (raw patches, temporal features, mask of the cells kept: those with a full history)."""
-        xs, ys = np.asarray(xs, dtype="float64"), np.asarray(ys, dtype="float64")
-        r_pix, c_pix = (np.asarray(v) for v in rowcol(ctx["transform"], xs, ys))
-        raw = gather_patches(ctx["padded"], r_pix, c_pix, px)
-        feats = cell_temporal_features(ctx["hourly"]["values"], ctx["hourly"]["location_ids"], ref_ids, ref_xy,
-                                       np.column_stack([xs, ys]), t_idx, ts, cfg)
-        keep = ~np.isnan(feats).any(axis=(1, 2))
-        return raw[keep], feats[keep], keep
-
-    def explain_cells(xs, ys):
-        """Grad-CAM for the cells at (xs, ys): (raw patches, cam, predictions, mask of the cells kept: those with a full history)."""
-        raw, feats, keep = cell_inputs(xs, ys)
-        cam, p_scaled = grad_cam(ctx["model"], ctx["scalers"].transform_patches(raw),
-                                 ctx["scalers"].transform_temporal(feats), ctx["device"])
-        return raw, cam, ctx["scalers"].inverse_y(p_scaled).ravel(), keep
-
-    def predict_cells(raw, feats):
-        """The prediction in ug/m3 for raw patches and temporal features (no gradients): used to swap one band and look again."""
-        import torch
-        model = ctx["model"].to(ctx["device"]).eval()
-        with torch.no_grad():
-            out = model(torch.from_numpy(np.ascontiguousarray(ctx["scalers"].transform_patches(raw))).to(ctx["device"]),
-                        torch.from_numpy(np.ascontiguousarray(ctx["scalers"].transform_temporal(feats))).to(ctx["device"]))
-        return ctx["scalers"].inverse_y(out.detach().cpu().numpy()).ravel()
+    cell_inputs, explain_cells, predict_cells = _cell_functions(cfg, ctx, ts, px)
 
     for group, flat in groups.items():
         r_out, c_out = np.unravel_index(flat, pred_map.shape)
@@ -727,6 +797,120 @@ def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
     return str(out_dir)
 
 
+NOTE_AGGREGATE = ("HOT and COLD cells here are the highest and lowest cells of the AVERAGE of the snapshot hours of the day (numbers match the map). "
+                  "The Grad-CAM shown is the average of the Grad-CAMs of the same cell at each of those hours, so it keeps what the CNN looks at "
+                  "all day, not what it looks at in a single hour.")
+
+
+def explain_day(cfg: dict, run_id: str | None, stamps: list) -> list[str]:
+    """Grad-CAM of several snapshot hours of a day: every hour on its own (explain/<day>_<hhmm>/, a finished hour is reused unless
+    output.explain.redo) and, when output.explain.aggregate is on (the default) and there are two or more hours of a date, the aggregate of
+    all of them in explain/<day>_all/. Returns the folders written."""
+    from output.volume import group_by_date
+
+    run_id = run_id or latest_run_id(cfg)
+    ex = cfg["output"]["explain"]
+    explain_root = Path(_paths(cfg)["snapshots_dir"]) / run_id / "explain"
+    written = []
+    for date, group in group_by_date([pd.Timestamp(t) for t in stamps]).items():
+        folders = {}
+        for ts in group:
+            folder = explain_root / ts.strftime("%Y%m%d_%H%M")
+            if (folder / "gradcam_summary.json").exists() and not ex.get("redo", False):
+                print(f"explain {ts:%Y-%m-%d %H:%M}: already done, reused")
+            else:
+                explain(cfg, run_id, str(ts))
+            folders[ts.strftime("%H:%M")] = folder
+            written.append(str(folder))
+        if len(group) > 1 and ex.get("aggregate", True):
+            written.append(explain_aggregate(cfg, run_id, group, folders))
+    return written
+
+
+def explain_aggregate(cfg: dict, run_id: str, group: list, folders: dict) -> str:
+    """explain/<day>_all/: the figures of every hour pooled (explain.aggregate), and the hot and cold cells of the average of the day's
+    snapshots with the Grad-CAM averaged over the hours."""
+    import rasterio
+    from rasterio.transform import xy as cell_xy_of
+
+    from explain import aggregate
+    from explain.gradcam import attention_profile
+    from explain.gradcam_map import plot_gradcam_map
+    from explain.gradcam_plots import plot_cam_overlays
+    from output import cartography
+    from reporting.spatial_bias import band_names_for
+    from training.run_info import write_json
+
+    date = group[0]
+    day = date.strftime("%Y%m%d")
+    out_dir = Path(_paths(cfg)["snapshots_dir"]) / run_id / "explain" / f"{day}_all"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    px, dpi, ex = cfg["derived"]["patch_px"], cfg["output"]["dpi"], cfg["output"]["explain"]
+    if px < 3:
+        write_json(out_dir / "gradcam_summary.json", {"skipped": "patches are smaller than 3x3 pixels, no saliency map"})
+        return str(out_dir)
+    names = band_names_for(_paths(cfg)["master_raster"], cfg)
+    hours = list(folders)
+    caption = (f"{date:%Y-%m-%d}, hours {', '.join(hours)}, run {run_id}; Grad-CAM on the last convolutional layer of the CNN branch; "
+               "city boundaries: GADM 4.1.")
+    summary = {"date": f"{date:%Y-%m-%d}", **aggregate.run(cfg, folders=folders, out_dir=out_dir, names=names, caption=caption, dpi=dpi,
+                                                          date=f"{date:%Y-%m-%d}")}
+
+    mean_path = Path(_paths(cfg)["snapshots_dir"]) / run_id / "surface" / day / "prediction_daily_mean.tif"
+    if mean_path.exists():
+        with rasterio.open(mean_path) as src:
+            mean_map, tr = src.read(1), src.transform
+        ctx = _inference_context(cfg, run_id)
+        boundary = cartography.active_boundary(cfg)
+        ok = np.isfinite(mean_map)
+        if boundary is not None:
+            ok &= cartography.inside_mask(tr, mean_map.shape, boundary)
+        cells, res = [], cfg["derived"]["raster_resolution_m"]
+        for group_name, flat in _hot_cold_cells(cfg, mean_map, tr, ok).items():
+            r_out, c_out = np.unravel_index(flat, mean_map.shape)
+            xs, ys = (np.asarray(v, dtype="float64") for v in cell_xy_of(tr, r_out, c_out, offset="center"))
+            n = len(xs)
+            raw_all = cam_all = pred_all = None
+            for i, ts in enumerate(group):
+                _, explain_cells, _ = _cell_functions(cfg, ctx, ts, px)
+                raw, cam, pred, keep = explain_cells(xs, ys)
+                if raw_all is None:
+                    raw_all = np.full((n,) + raw.shape[1:], np.nan)
+                    cam_all = np.full((len(group), n) + cam.shape[1:], np.nan)
+                    pred_all = np.full((len(group), n), np.nan)
+                raw_all[keep], cam_all[i, keep], pred_all[i, keep] = raw, cam, pred
+            if raw_all is None:
+                continue
+            whole = np.isfinite(pred_all).all(axis=0)                     # cells with a full history at every hour
+            if not whole.any():
+                continue
+            raw, cam, pred = raw_all[whole], cam_all[:, whole].mean(axis=0), pred_all[:, whole].mean(axis=0)
+            gx, gy = xs[whole], ys[whole]
+            titles = [f"{group_name.upper()} #{i + 1}\n{pred[i]:.1f} \u00b5g/m\u00b3\n({gx[i]:.0f}, {gy[i]:.0f})" for i in range(len(cam))]
+            plot_cam_overlays(raw, cam, names, titles, str(out_dir / f"gradcam_{group_name}_cells.png"), ex["attention_quantile"], dpi,
+                              cfg=cfg, px_m=res, caption=caption, notes=(NOTE_AGGREGATE,),
+                              heading=f"Grad-CAM, {group_name} cells of the mean of {', '.join(hours)} ({date:%Y-%m-%d})")
+            k = int(ex.get("example_cell", 1)) - 1
+            if 0 <= k < len(cam):
+                plot_cam_overlays(raw[k:k + 1], cam[k:k + 1], names, titles[k:k + 1], str(out_dir / f"gradcam_{group_name}_row.png"),
+                                  ex["attention_quantile"], dpi, px_m=res)
+            cells += [{"group": group_name, "number": i + 1, "x": float(gx[i]), "y": float(gy[i]), "predicted": float(pred[i])}
+                      for i in range(len(cam))]
+            prof = attention_profile(raw, cam, list(names), ex["attention_quantile"])
+            pd.DataFrame([{"group": group_name, "cell_number": r["patch"] + 1, "x": float(gx[r["patch"]]), "y": float(gy[r["patch"]]),
+                           "predicted": float(pred[r["patch"]]), **{k2: v for k2, v in r.items() if k2 != "patch"}} for r in prof]
+                         ).to_csv(out_dir / f"gradcam_attention_mean_{group_name}.csv", index=False)
+            summary.setdefault("mean_of_hours_cells", {})[group_name] = int(len(cam))
+        if cells:
+            plot_gradcam_map(mean_map, tr, ctx["crs"], cells, cfg, str(out_dir / "gradcam_map.png"),
+                             f"PM2.5 prediction, mean of {', '.join(hours)} ({date:%Y-%m-%d})", stations=ctx["stations"], caption=caption, dpi=dpi)
+    else:
+        summary["note"] = f"{mean_path.name} is missing, so there are no hot and cold cells of the day's average (the pooled figures are still there)"
+    write_json(out_dir / "gradcam_summary.json", summary)
+    print(f"Grad-CAM of all hours written to {out_dir}")
+    return str(out_dir)
+
+
 def report(cfg: dict, run_id: str | None, baseline: str | None = None) -> None:
     """generate_snapshot for run_id (default: latest run); runs the geocp and bias stages first if needed."""
     from reporting.snapshot_generator import generate_snapshot
@@ -783,8 +967,8 @@ def main() -> None:
     p.add_argument("--run-id", default=None)
     p.add_argument("--baseline", default=None, help="report: run id of a temporal-only run to compare R2 with")
     p.add_argument("--prediction-raster", default=None, help="surface: point-prediction GeoTIFF")
-    p.add_argument("--timestamp", action="append", default=[], help="infer / explain: local hour, e.g. '2025-07-01 12:00' (repeatable for infer)")
-    p.add_argument("--date", action="append", default=[], help="infer: a day, expanded to inference.snapshot_hours (repeatable)")
+    p.add_argument("--timestamp", action="append", default=[], help="infer / explain: local hour, e.g. '2025-07-01 12:00' (repeatable)")
+    p.add_argument("--date", action="append", default=[], help="infer / explain: a day, expanded to inference.snapshot_hours (repeatable); explain also pools the hours (output.explain.aggregate)")
     p.add_argument("--override", action="append", default=[], help="section.key=value (YAML value)")
     args = p.parse_args()
 
@@ -846,7 +1030,14 @@ def run(cfg: dict, args) -> None:
     if stage == "infer":
         infer(cfg, run_id, args.timestamp, args.date)
     if stage == "explain":
-        explain(cfg, run_id, args.timestamp[0] if args.timestamp else None)
+        stamps = [pd.Timestamp(t) for t in args.timestamp]
+        if args.date:                                          # a day = every snapshot hour (inference.snapshot_hours) + the aggregate
+            from output.volume import expand_dates
+            stamps += expand_dates(args.date, cfg["inference"]["snapshot_hours"])
+        if not stamps:
+            raise SystemExit("--stage explain needs --date 2025-07-01 (every snapshot hour and their aggregate) or --timestamp '2025-07-01 12:00' "
+                             "(repeatable), made by --stage infer")
+        explain_day(cfg, run_id, stamps)
     if stage in ("report", "all"):
         report(cfg, run_id, args.baseline)
 

@@ -210,7 +210,7 @@ Run these to redo or inspect a single step. Each stage reads what the previous o
 | bias | `--stage bias` | Moran's I and LISA on the out-of-fold residuals | `data/spatial_bias.json`, `plots/lisa_*.png` |
 | report | `--stage report` | accuracy report and plots; prints the headline (runs `geocp` and `bias` first if missing) | `SUMMARY.md`, `metrics_summary.json`, `plots/`, `tables/` |
 | infer | `--stage infer --date D` | a prediction and interval for every raster cell, four snapshots a day (runs `geocp` first if it has not been run) | `surface/<D>/` |
-| explain | `--stage explain --timestamp "D HH:MM"` | Grad-CAM on the hottest and coldest cells | `explain/<D_HHMM>/` |
+| explain | `--stage explain --date D` (or `--timestamp "D HH:MM"`, repeatable) | Grad-CAM on the hottest and coldest cells of every snapshot hour, and (default) their aggregate | `explain/<D_HHMM>/`, `explain/<D>_all/` |
 | tune | `--stage tune` | Bayesian hyperparameter search with nested spatial CV (slow) | `tuning/<id>/` |
 | rasters | `--stage rasters` | builds the Master GeoTIFF from the source layers (one-off) | `processed/rasters/` |
 | clean | `--stage clean` (alias `reset`) | **reset**: lists the generated outputs it would delete; add `--yes` to delete them. See [2.13](#213-start-over-reset) | |
@@ -385,8 +385,13 @@ that needs no key (mind its usage policy). The key is sent as `?key=<key>` on th
 `xyzservices` definition of the CARTO providers (used by `contextily`) writes it; if your key's instructions say
 otherwise, give the whole tile URL in `output.basemap_url` with `${CARTO_API_KEY}` where the key goes.
 
-**Grad-CAM.** `python run_pipeline.py --stage explain --timestamp "2025-07-01 12:00"` works on a snapshot made by
-`infer` for that date. It needs patches of at least 3 × 3 pixels (320 m / raster resolution), which the 10 m raster
+**Grad-CAM.** `python run_pipeline.py --stage explain --date 2025-07-01` explains every snapshot hour of the day (the ones
+`infer --date` made: 08:00, 12:00, 17:00, 21:00) and, by default (`output.explain.aggregate`), pools them into
+`explain/20250701_all/`: the band profile, SHAP-style swarm, importance and ablation figures of all hours together,
+`gradcam_band_by_hour.png` (mean attention per band for each hour and for all hours), and the hot and cold cells of the
+*average* of the day's snapshots with the Grad-CAM averaged over the hours. A finished hour is reused
+(`output.explain.redo: true` redoes it). `--timestamp "2025-07-01 12:00"` (repeatable) explains single hours the same way, and
+works on a snapshot made by `infer` for that date. It needs patches of at least 3 × 3 pixels (320 m / raster resolution), which the 10 m raster
 gives (32 × 32). It writes four figures into `explain/<D_HHMM>/`:
 
 | File | Shows |
@@ -526,6 +531,9 @@ The switches most often wanted:
 | search epochs during tuning | `tune.search_epochs` | `false`, `true` |
 | skip the outer tuning loop | `tune.nested_evaluation` | `true`, `false` |
 | GeoCP weights normalised to one, or with the finite-sample correction | `geocp.finite_sample_correction` | `false`, `true` |
+| no GeoCP at all (no calibration stations, no intervals in `all` / `report` / `infer`; `--stage geocp` and `--stage surface` still run it when called) | `geocp.enabled` | `true`, `false` |
+| continue a stopped training run from its last finished CV fold | `train.resume` | `false`, `true` |
+| Grad-CAM of the hours pooled into `explain/<D>_all/` | `output.explain.aggregate` | `true`, `false` |
 | neighbours used for map cells | `inference.lag_reference` | `train`, `all` |
 | OpenAQ-only history from a year on | `inference.openaq_only_from_year` | `2026`, `null` (off) |
 | predict a coarser grid | `inference.stride_px` (odd) | `1`, `3`, `5` … |

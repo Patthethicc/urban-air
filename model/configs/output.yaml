@@ -73,6 +73,10 @@ explain:                  # Grad-CAM on the CNN branch (--stage explain)
   min_separation_m: 1000  # no two explained cells closer than this, so the 6 hottest are 6 places and not one hotspot's neighbours
                           # (0 = just the top and bottom cells)
   attention_quantile: 0.8 # "attended" pixels = the top 20 % of a patch's Grad-CAM values
+  aggregate: true         # --stage explain --date D (or several --timestamp of one day): besides every hour on its own, an explain/<day>_all/ folder with the
+                          # figures of all hours pooled (band profile, swarm, importance, ablation, a by-hour chart) and the hot and cold cells of the
+                          # AVERAGE of the day's snapshots with the Grad-CAM averaged over the hours. false = the hours only.
+  redo: false             # true = explain an hour again although its folder is finished (false reuses it, so a stopped run continues)
   example_cell: 1         # also write ONE row of the hot and of the cold close-up sheet on its own, without notes (gradcam_hot_row.png,
                           # gradcam_cold_row.png), for a paper figure: the cell with this number (1 = the highest / lowest predicted); 0 = off
   feature_groups:         # also in --stage explain: the hot and cold cells of the HIGH and the LOW end of each morphology band over the whole NCR

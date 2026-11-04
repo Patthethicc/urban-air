@@ -21,6 +21,8 @@ early_stopping_patience: 8
 grad_clip: 1.0
 cv:
   enabled: true         # spatial k-fold on the training stations; fold best epochs set the final epoch count
+resume: false           # true = continue the newest training run that was stopped before it finished (its finished CV folds are kept,
+                        #        the fold that was running starts again). false = always start a new run. The Kaggle notebook sets it.
 final_epochs: null      # override the epoch count of the final fit (null = mean best epoch of the folds)
 runtime:                # progress, hang detection, time budget (runtime_guard.py); a slow run is fine, a hung one is not
   progress_every_s: 30  # print a progress line inside long passes at least this often (0 = quiet)
