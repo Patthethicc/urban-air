@@ -30,6 +30,7 @@ What you get from one run:
 5. [Known limits](#5-known-limits)
 6. [How it was checked](#6-how-it-was-checked)
 7. [Which thesis text became which code](#7-which-thesis-text-became-which-code)
+8. [Findings so far and the transfer-learning plan](#8-findings-so-far-and-the-transfer-learning-plan)
 
 ---
 
@@ -533,6 +534,7 @@ The switches most often wanted:
 | GeoCP weights normalised to one, or with the finite-sample correction | `geocp.finite_sample_correction` | `false`, `true` |
 | no GeoCP at all (no calibration stations, no intervals in `all` / `report` / `infer`; `--stage geocp` and `--stage surface` still run it when called) | `geocp.enabled` | `true`, `false` |
 | continue a stopped training run from its last finished CV fold | `train.resume` | `false`, `true` |
+| train on only n of the training stations (learning curve; the test stations never change; see `learning_curve.ipynb`) | `data.split.train_subset.n_stations` (+ `.seed`) | `null`, `20`, `40` … |
 | Grad-CAM of the hours pooled into `explain/<D>_all/` | `output.explain.aggregate` | `true`, `false` |
 | neighbours used for map cells | `inference.lag_reference` | `train`, `all` |
 | OpenAQ-only history from a year on | `inference.openaq_only_from_year` | `2026`, `null` (off) |
@@ -652,6 +654,78 @@ also gives the share of the NCR area the raster covers and how many km are missi
 Two other facts about the raster: it is a plain rectangle with data everywhere (no nodata outside the NCR), so city
 maps also show Manila Bay and the neighbouring provinces; and far from any sensor a cell's prediction is mostly its
 nearest stations' values (the spatial-lag stand-in of [3.9](#39-city-wide-inference-and-maps)).
+
+### 2.15 Four models on Kaggle: `training_cells.ipynb`
+
+The notebook at the repository root trains and compares four models of one dataset, in one go and resumably:
+
+| name | CNN branch | GeoCP | training stations |
+|---|---|---|---|
+| `cnn_nogeocp` | yes | no | 67 (no calibration set) |
+| `nocnn_nogeocp` | no (LSTM only) | no | 67 |
+| `cnn_geocp` | yes | yes | 54 + 13 calibration |
+| `nocnn_geocp` | no (LSTM only) | yes | 54 + 13 calibration |
+
+`RUN_VARIANTS` (cell 1) lists the models to run, in order (the most important first); `MAPS_FOR` lists the ones that also get maps and
+Grad-CAM (default `cnn_nogeocp`; they need the CNN branch). Comparing a row of the table says what the morphology adds, comparing a column
+says what holding the calibration stations out costs. Each model has its own `checkpoints_<name>/` and `snapshots_<name>/` under
+`runs/<dataset>/`; preprocessing is shared by the two models with the same GeoCP setting (`processed_geocp/`, `processed_nogeocp/`). A
+GeoCP-trained run left by an older version of the notebook (`runs/<dataset>/{processed,checkpoints,snapshots}`) is reused as `cnn_geocp`.
+After the runs, cell 5 writes `model_comparison.csv`: CV R², test R², RMSE, MAE, and the R² the CNN adds within each GeoCP setting.
+
+**Turning GeoCP off** is `geocp.enabled: false` (`configs/geocp.yaml`; the notebook sets it per model). Then no calibration stations are
+picked (the stations that would have been calibration stations train the model; the test stations are the same), the `geocp` stage inside
+`all` only writes the test predictions that `report` needs, `infer` writes `prediction_volume.tif` without the lower / upper / width volumes,
+and `SUMMARY.md` says GeoCP was not run. `--stage geocp` and `--stage surface` still run GeoCP when you call them yourself. The test rows
+differ slightly between the two settings (287 k with GeoCP, 295 k without) because a larger training set leaves fewer windows without a usable
+lag, so compare the CNN effect within a GeoCP setting.
+
+**The 12-hour limit and resuming.** `TIME_BUDGET_H` (default 11) makes the notebook stop by itself: every stage gets
+`train.runtime.max_hours` for the time left, and a stage that runs out stops cleanly (exit code 124), after which the notebook prints where it
+stopped. Training saves every finished cross-validation fold (`fold_<k>_result.json`, `fold_<k>_oof.csv`), and `train.resume: true` (set by the
+notebook) continues the newest run that was stopped (status `running` / `timed_out`) from its first unfinished fold; the fold that was running
+starts again. To continue in another session: *Save Version*, then *Add Input* → this notebook's output (and the data), and run all: finished
+steps are skipped. Changing a model or training setting between sessions makes a finished run count as stale and be retrained
+(`RETRAIN_IF_CONFIG_CHANGED`); do not change them while a run is half done. To redo something on purpose put its name in `REDO`.
+
+**Grad-CAM over the four snapshot hours.** `python run_pipeline.py --stage explain --date 2025-07-23` explains every snapshot hour
+(`explain/20250723_0800/` … `_2100/`) and, by default (`output.explain.aggregate`), pools them into `explain/20250723_all/`:
+
+| File | Shows |
+|---|---|
+| `gradcam_band_profile.png`, `gradcam_attention.csv` | hot against cold cells, every hour's cells pooled |
+| `gradcam_band_swarm.png`, `gradcam_band_importance.png`, `gradcam_band_swarm.csv` | the SHAP-style swarm and bars, the sampled NCR cells of all hours pooled (cell-hours) |
+| `band_ablation.png`, `band_ablation_swarm.png`, `band_ablation.csv` | the impact counterpart (swap a band, see the prediction move), pooled |
+| `gradcam_band_by_hour.png`, `.csv` | mean \|attention\| per band for each hour and for all hours: are the hours alike? |
+| `gradcam_hot_cells.png`, `gradcam_cold_cells.png`, `gradcam_*_row.png`, `gradcam_map.png` | the hot and cold cells of the **average** of the day's four snapshots, with the Grad-CAM **averaged over the hours** |
+
+A finished hour is reused (`output.explain.redo: true` redoes it); `output.explain.aggregate: false` gives the hours only. `--timestamp` (repeatable)
+explains single hours the same way. Nothing is recomputed for the pooled figures: they read the tables the hours already wrote.
+
+### 2.16 Learning curve: `learning_curve.ipynb`
+
+The question: **does the CNN branch pay off as the number of training stations grows?** It is the first step of the transfer-learning plan
+([8](#8-findings-so-far-and-the-transfer-learning-plan)). The notebook trains the CNN-LSTM and the LSTM-only model on 20, 40, 54 and all 67 training stations
+(`SIZES`) and scores both on the **same test stations**. Subsets come from `data.split.train_subset` (`n_stations`, `seed`): the first n stations of a
+seeded shuffle of the training stations, so the subsets of one seed are nested (20 ⊂ 40 ⊂ 54). The stations left out belong to no partition: they are not
+trained on, are not lag neighbours and are not tested on. GeoCP is off. By default cross-validation is off and the epochs are fixed per model (`EPOCHS`: 7 for the
+CNN-LSTM, 15 for the LSTM-only, what cross-validation chose on the full data), so a point costs one fit; `USE_CV = True` brings cross-validation back (about four times the time).
+The notebook has the same time budget and resume as 2.15. It writes `learning_curve.csv`, `learning_curve_gap.csv` and `learning_curve.png`.
+
+**What a "draw" is, and how to use it.** A draw is one random subset of the training stations: a replicate of the station sample. At 20 stations it matters which 20
+you pick, so a single subset mixes "fewer stations" with "lucky or unlucky stations". With `DRAWS` replicates per size:
+
+- each dot is one draw; the width of the dots at a size is the station-sampling variability; the line is the mean over draws;
+- both models of a draw see the identical stations, so the **paired gap** (CNN-LSTM minus LSTM-only) cancels station luck. The gap is the number the decision rests on;
+- the test stations are fixed, so the curve describes these 16 test stations. Test-set uncertainty is a separate matter (a bootstrap over the test stations);
+- draws overlap more at large sizes (two draws of 54 from 67 share at least 41 stations), so the spread there understates the sampling variability, and the full-size point has
+  no subset variability at all (add training seeds if you need it);
+- three draws is a minimum; with n = 3 report min and max, not a standard deviation. Small sizes are cheap, so more draws cost mostly time there.
+
+A rule worth writing down before the run: *the CNN branch is judged to benefit from more stations if the mean gap rises across sizes and the gap at the
+largest size lies above the draw-to-draw spread of the gap at the smallest.* Suggested wording for the thesis: "We repeated each training-set size over R random station subsets,
+nested within a draw, and trained both models on the same subset. The accuracy of a size is the mean over draws, the CNN effect is the paired difference between models within a draw,
+and the spread across draws shows how much of the curve is due to which stations were sampled. The 16 test stations are the same at every point."
 
 ---
 
@@ -990,3 +1064,69 @@ End-to-end runs on the pilot data covered preprocess → tune → train `--tuned
 | Section 4.5 / Validation: GeoCP | `uncertainty/geocp.py`, `uncertainty/geocp_surface.py` |
 | Output: inference, volume, AQI maps | `inference/`, `output/` |
 | Output: Grad-CAM | `explain/` |
+
+---
+
+## 8. Findings so far and the transfer-learning plan
+
+### 8.1 What the four models showed
+
+Runs of 4 November 2026 (`training_cells.ipynb`, dataset `from_2023_with_preinstall`, raster `master_raster_v3`, tuned hyperparameters, seed 42, 3 spatial CV folds,
+16 test stations with readings). Scores are on stations the models never saw.
+
+| model | CV R² | test R² | test RMSE | test MAE | parameters |
+|---|---|---|---|---|---|
+| CNN-LSTM, no GeoCP | 0.708 | 0.721 | 5.42 | 3.39 | 1,058,929 |
+| LSTM-only, no GeoCP | 0.715 | 0.724 | 5.39 | 3.36 | 169,073 |
+| CNN-LSTM, GeoCP | 0.692 | 0.707 | 5.50 | 3.44 | 1,058,929 |
+| LSTM-only, GeoCP | 0.699 | 0.718 | 5.39 | 3.38 | 169,073 |
+
+- **The CNN branch does not improve accuracy.** Paired over the 16 test stations (bootstrap, 2,000 resamples): without GeoCP the test R² gap (CNN-LSTM minus LSTM-only) is −0.003, 95 % range
+  −0.008 to +0.002 (no difference; the CNN is better at 8 of 16 stations); with GeoCP it is −0.011, range −0.016 to −0.008 (the CNN-LSTM is worse; better at 1 of 16). The two
+  models' errors correlate at 0.97 to 0.98 and a 50/50 average gives R² 0.726. Cross-validation agrees with the test.
+- **Most of the skill is the previous hour.** Repeating the previous hour gives R² 0.646; the LSTM adds 0.078, the CNN branch −0.003 on top of that. The LSTM-only model's skill against
+  the previous hour is 0.22 (1 − MSE ratio).
+- **Peaks dominate the error.** The 9 % of test hours above 30 µg/m³ produce 51 % of the squared error, the 1.3 % above 50 µg/m³ produce 29 %. The CNN is slightly better below 30 and
+  slightly worse above, so the two cancel.
+- **Training.** The CNN-LSTM's best validation epoch comes after 1 to 10 epochs (final fits of 7 and 3 epochs), the LSTM-only's after 4 to 19 (final fits of 15 and 9). 885,760 of the
+  CNN-LSTM's 1.06 M parameters are in the CNN, fitted on one 320 m patch per station, 54 to 67 distinct images in total. Overfitting to those few patches is the likely reading;
+  the runs show early stopping and the parameter counts, not the mechanism.
+- **Grad-CAM and band ablation (`cnn_nogeocp`, 3 dates × 4 hours).** Attention ranks NDVI first on every date and in every hour (the hours look alike); swapping a band moves the
+  prediction most for the building-height bands (0.4 to 1.2 µg/m³ on average, against a test RMSE of 5.4). The model reads the bands, but attention and impact disagree and the
+  impact does not buy accuracy. Both are model sensitivities, not causal effects.
+- **More training stations helped, the CNN most.** Removing GeoCP returned the 13 calibration stations to training (54 → 67): test R² 0.707 → 0.721 for the CNN-LSTM (+0.014) and
+  0.718 → 0.724 for the LSTM-only (+0.006). This is one split and the test rows differ slightly (287 k and 295 k), so it is a hint, not a result.
+- No spatial clustering is left in the residuals (global Moran's I not significant in all four runs).
+
+### 8.2 What this means for transfer learning
+
+- **Capacity is not the limit.** A vision transformer or a deeper or pretrained backbone has even more capacity for the same 54 to 67 distinct patches, so it should not be expected to
+  help (ImageNet backbones also do not fit 5-band, 32 × 32 morphology). Run it as an ablation and report it even if it loses.
+- **Data is the lever.** Transfer learning pays only if it adds distinct stations or conditions. Other Southeast Asian cities would; the risks are different sensors, sources and
+  climate, and that each city needs the same five morphology bands built first.
+- **The temporal side needs no rasters** to transfer: pretrain the LSTM and the lag model on other cities' hourly PM2.5 and fine-tune on Manila.
+- **The model sees only PM2.5.** Adding meteorology (wind, rain, humidity, boundary-layer height) is likely the largest single accuracy gain; repeating the previous hour already gives 0.646.
+
+### 8.3 The plan, in order of cost against information
+
+| step | what | cost | it tells you |
+|---|---|---|---|
+| 1 | learning curve: both models on 20, 40, 54, 67 Manila stations (`learning_curve.ipynb`, [2.16](#216-learning-curve-learning_curveipynb)) | hours, no new data | whether more stations make the CNN pay off, and whether the LSTM-only gains from more stations |
+| 2 | add meteorology | an ERA5 download | the likely largest R² gain |
+| 3 | pretrain the LSTM on other cities' hourly PM2.5, fine-tune on Manila | no rasters needed | whether the temporal part transfers |
+| 4 | pretrain the CNN-LSTM on other Southeast Asian cities, fine-tune on Manila | five morphology bands per city: weeks | the adviser's main idea |
+| (ablation) | a ViT or another backbone | a configuration change | expected negative; report it |
+
+### 8.4 Is step 1 redundant?
+
+Partly, and it depends on what it is for.
+
+- **It gates only step 4.** Steps 2 and 3 do not depend on it: run them regardless. Step 1 decides whether the expensive morphological transfer (weeks of raster building) is worth it.
+- **It is cheap, needs no new data, and gives two curves.** The gap (CNN-LSTM minus LSTM-only) answers the morphological question. The LSTM-only curve alone answers the temporal one: if it keeps rising
+  with the number of stations, more stations or cities should help step 3 too; if it is flat, expect little from transfer there.
+- **A flat or negative gap is a strong reason not to build step 4**, and a positive trend is a reason to; either result is a thesis result and answers "why transfer?" at the defence.
+- **Its limits.** A trend over 20 to 67 stations is an extrapolation to hundreds, and it cannot test domain shift (other sensors, sources, climate). A positive result is necessary
+  evidence, not sufficient.
+- **When it is redundant.** If you will do step 4 whatever step 1 says, step 1 has no decision value, because step 4 contains its own comparison with and without morphology. Then
+  run it only as context, with fewer draws (for example sizes 20, 40 and all, 2 draws).
+

@@ -84,7 +84,7 @@ def run(cfg: dict, *, folders: dict, out_dir, names: list[str], caption: str | N
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     hours = list(folders)
-    label = f"{date}, all hours ({', '.join(hours)})"
+    label = f"{date}, all {len(hours)} hours"                     # the hours themselves are in the caption: a longer heading is cut off the figure
     summary: dict = {"hours": hours}
 
     attention = read_hours(folders, "gradcam_attention.csv")

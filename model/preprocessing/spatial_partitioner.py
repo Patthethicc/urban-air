@@ -17,7 +17,8 @@ from sklearn.model_selection import GroupKFold
 def partition_locations(location_ids, cfg: dict) -> dict[str, list]:
     """Return {'train': [...ids], 'calibration': [...], 'test': [...]}, seeded and mutually exclusive.
     Test is carved out first, then calibration from the remainder. split.test_stations /
-    calibration_stations are honoured when given. With geocp.enabled false there is no calibration partition (the test
+    calibration_stations are honoured when given. data.split.train_subset.n_stations keeps only that many training stations (seeded, nested
+    for growing n; the rest are left out of every partition). With geocp.enabled false there is no calibration partition (the test
     stations are the same as with GeoCP on; the calibration ones join the training stations)."""
     s = cfg["data"]["split"]
     ids = sorted(int(i) for i in set(location_ids))
@@ -40,6 +41,12 @@ def partition_locations(location_ids, cfg: dict) -> dict[str, list]:
     else:                                                  # no GeoCP: no calibration stations, every development station trains
         calibration = []
     train = [i for i in development if i not in set(calibration)]
+    sub = s.get("train_subset") or {}
+    if sub.get("n_stations") is not None and int(sub["n_stations"]) < len(train):
+        # a learning-curve run: only the first n of a seeded shuffle of the training stations train the model (the same seed gives nested sets
+        # for growing n). The others belong to no partition, so they are neither trained on, nor a lag neighbour, nor tested on.
+        order = np.random.default_rng(int(sub.get("seed", 0))).permutation(train)
+        train = sorted(int(i) for i in order[:int(sub["n_stations"])])
 
     if len(train) < s["cv_folds"]:
         raise ValueError(f"only {len(train)} training stations for {s['cv_folds']} spatial CV folds")

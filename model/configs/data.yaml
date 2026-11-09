@@ -122,3 +122,6 @@ split:                          # SPATIAL: by monitoring location, never by row 
   # optional hand-picked station lists override the fractions
   test_stations: []
   calibration_stations: []
+  train_subset:                 # learning curve: train on only a subset of the training stations (the test stations never change)
+    n_stations: null            # null = all of them. n = keep n, picked by a seeded shuffle (the same seed gives nested sets for growing n)
+    seed: 0                     # the other stations are left out of every partition: not trained on, not a lag neighbour, not tested on

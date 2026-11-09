@@ -52,3 +52,25 @@ def test_with_geocp_off_there_is_no_calibration_partition_and_the_test_stations_
     assert off["calibration"] == []
     assert off["test"] == on["test"]                                         # the same test stations, so the runs compare
     assert off["train"] == sorted(on["train"] + on["calibration"])           # the calibration stations now train
+
+
+def test_a_train_subset_keeps_the_test_stations_and_nests_for_growing_n(cfg):
+    cfg["geocp"]["enabled"] = False
+    full = partition_locations(_ids(40), cfg)
+    sizes = {}
+    for n in (6, 12, 20):
+        cfg["data"]["split"]["train_subset"] = {"n_stations": n, "seed": 3}
+        part = partition_locations(_ids(40), cfg)
+        sizes[n] = part
+        assert len(part["train"]) == n and part["test"] == full["test"] and set(part["train"]) <= set(full["train"])
+        assert set(part) == {"train", "calibration", "test"}                      # the left-out stations are in no partition
+    assert set(sizes[6]["train"]) <= set(sizes[12]["train"]) <= set(sizes[20]["train"])      # nested for one seed
+    cfg["data"]["split"]["train_subset"] = {"n_stations": 6, "seed": 4}
+    assert partition_locations(_ids(40), cfg)["train"] != sizes[6]["train"]       # another seed, another subset
+
+
+def test_a_train_subset_as_large_as_the_training_set_changes_nothing(cfg):
+    cfg["geocp"]["enabled"] = False
+    full = partition_locations(_ids(40), cfg)
+    cfg["data"]["split"]["train_subset"] = {"n_stations": 10_000, "seed": 1}
+    assert partition_locations(_ids(40), cfg) == full
