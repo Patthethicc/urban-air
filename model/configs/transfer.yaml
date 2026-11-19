@@ -1,0 +1,13 @@
+# Transfer learning of the TEMPORAL side (`--stage pretrain`, then `--stage train --override train.init_from=<pretrained_lstm.pt>`).
+# Pretrain the LSTM on other cities' hourly PM2.5 (data/Other Countries/, written by other-country-scrapers/scrapers.ipynb), then fine-tune on Manila.
+# PM2.5 history only: no weather, no morphology (the source cities have no rasters). The source series are scaled with the MANILA scalers
+# (processed_dir/scalers.json), so the pretrained weights see inputs on the scale the fine-tuning will use: run `--stage preprocess` for Manila first.
+source_root: ../data/Other Countries
+sources: []             # folders under source_root, e.g. [vietnam/ho_chi_minh_city, thailand/bangkok]; [] = every folder that holds a source.json
+top_k_stations: null    # keep only the k source stations whose PM2.5 distribution is closest to the Manila TRAINING stations (maximum mean discrepancy);
+                        # null = every source station. The ranking of all stations is always written (station_ranking.csv)
+exclude_months: []      # calendar months (1-12) left out of the source series, e.g. [2, 3, 4] for the regional burning season. [] = none: test it, do not assume it
+epochs: 30              # upper bound; early stopping on held-out SOURCE stations (train.early_stopping_patience) ends sooner
+val_station_fraction: 0.15   # share of the source stations held out to stop the pretraining (whole stations, like the spatial split of the main model)
+max_rows: null          # cap on the number of source windows (a random subsample, seed below): a quick look at a huge source set. null = all
+seed: 42

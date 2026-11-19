@@ -59,6 +59,23 @@ _load_dotenv(os.path.join(ROOT, '.env'))
 # The pilot files are never overwritten, so the published pilot results stay reproducible: running
 # with XGB_DATASET=pilot restores exactly the 378-cell / 11-3-3 configuration that produced them.
 # ---------------------------------------------------------------------------------------------
+# ---- snapshot hours ----------------------------------------------------------------------------
+# The hours of a day that `--stage infer --date D` predicts and draws. Default: all 24, so the maps can be played as a day (animation /
+# slideshow). The old four-hour set is XGB_SNAPSHOT_HOURS=8,12,17,21 (morning peak, midday, afternoon peak, night). The CNN-LSTM uses
+# the same default (model/configs/inference.yaml, snapshot_hours). A 24-hour day takes six times as long as four hours.
+def _snapshot_hours():
+    raw = os.environ.get('XGB_SNAPSHOT_HOURS', '').strip()
+    if not raw:
+        return list(range(24))                       # default: every hour of the day
+    hours = [int(x) for x in raw.split(',') if x.strip()]
+    bad = [h for h in hours if not 0 <= h <= 23]     # an hour outside 0-23 is a typo, stop early with a clear message
+    if bad:
+        raise ValueError(f'XGB_SNAPSHOT_HOURS has hours outside 0-23: {bad}')
+    return hours
+
+
+SNAPSHOT_HOURS = _snapshot_hours()
+
 DATASET = os.environ.get('XGB_DATASET', 'full').strip().lower()
 if DATASET not in ('full', 'pilot'):
     raise ValueError(f"XGB_DATASET must be 'full' or 'pilot', got {DATASET!r}")

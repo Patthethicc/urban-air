@@ -6,7 +6,7 @@ import yaml
 
 MODEL_DIR = Path(__file__).parent
 CONFIG_DIR = MODEL_DIR / "configs"
-SECTIONS = ["data", "model", "train", "report", "geocp", "tune", "inference", "output"]
+SECTIONS = ["data", "model", "train", "report", "geocp", "tune", "inference", "output", "transfer"]
 
 
 def load_yaml(name: str) -> dict:
@@ -19,9 +19,11 @@ def feature_base_names(data_cfg: dict) -> list[str]:
     """Per-timestep feature names, in the F-order used everywhere:
     [pm25, (spatial_lag), (roll_mean, roll_std), (sin_hour, cos_hour)]."""
     t = data_cfg["temporal"]
-    names = ["pm25"]
-    if data_cfg["spatial_lag"]["enabled"]:
-        names.append("spatial_lag")
+    names = []
+    if t.get("use_pm25_lags", True):                        # False = the no-history diagnostic: neither the PM2.5 lags nor the spatial lag
+        names.append("pm25")
+        if data_cfg["spatial_lag"]["enabled"]:
+            names.append("spatial_lag")
     if t.get("rolling_window"):
         names += ["roll_mean", "roll_std"]
     if t.get("cyclical_hour"):
@@ -87,6 +89,8 @@ def validate(cfg: dict) -> None:
     if not crs.is_projected or any(a.unit_name != "metre" for a in crs.axis_info):
         raise ValueError(f"data.crs {cfg['data']['crs']} must be a projected CRS in metres (planar distances in m); "
                          "a geographic CRS (degrees, e.g. EPSG:4326) is refused")
+    if not cfg["derived"]["feature_names"]:
+        raise ValueError("data.temporal.use_pm25_lags is false and cyclical_hour is false: the temporal branch would have no input at all")
     split = cfg["data"]["split"]
     for key in ("test_fraction", "calibration_fraction"):
         if not 0 < split[key] < 1:

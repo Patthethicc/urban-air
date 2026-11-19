@@ -11,7 +11,7 @@ What you get from one run:
 - a trained model with its full settings stored next to it, and a one-row-per-run comparison table;
 - test metrics (RMSE, MAE, R²) and GeoCP interval quality (coverage, widths, urban core vs. periphery);
 - a spatial-bias check of the residuals (Moran's I, LISA clusters over the morphology bands);
-- for any day: four snapshot surfaces (08:00, 12:00, 17:00, 21:00) with intervals, a 24-hour mean, and maps on
+- for any day: 24 hourly snapshot surfaces (the whole day; `inference.snapshot_hours`) with intervals, a 24-hour mean, an animation and a slideshow, and maps on
   the Philippine AQI scale; Grad-CAM saliency of the CNN on the hottest and coldest cells.
 
 > **Status.** Runs on the real data in the repo's `data/` folder: a 10 m Master GeoTIFF (EPSG:32651, 5 bands,
@@ -206,11 +206,12 @@ Run these to redo or inspect a single step. Each stage reads what the previous o
 | Stage | Command | What it does | Main output |
 |---|---|---|---|
 | preprocess | `--stage preprocess` | clean hourly series, split stations into train / calibration / test, spatial lag, windows, patches, scaling | `processed/` |
+| dataset | `--stage dataset` | the dataset report: sensors and coverage, rows kept and dropped, missingness, temporal availability, the PM2.5 distribution, the distributions of the five morphology bands | `dataset_report/` next to `processed/` |
 | train | `--stage train` | spatial cross-validation on the training stations, then the final fit | `checkpoints/<run_id>/` |
 | geocp | `--stage geocp` | predicts calibration and test stations, picks the GeoCP setting, builds intervals | `data/predictions_*.csv`, `data/geocp.json`, `data/calibration_table.csv` |
 | bias | `--stage bias` | Moran's I and LISA on the out-of-fold residuals | `data/spatial_bias.json`, `plots/lisa_*.png` |
 | report | `--stage report` | accuracy report and plots; prints the headline (runs `geocp` and `bias` first if missing) | `SUMMARY.md`, `metrics_summary.json`, `plots/`, `tables/` |
-| infer | `--stage infer --date D` | a prediction and interval for every raster cell, four snapshots a day (runs `geocp` first if it has not been run) | `surface/<D>/` |
+| infer | `--stage infer --date D` | a prediction and interval for every raster cell, 24 snapshots a day by default (runs `geocp` first if it has not been run) | `surface/<D>/` |
 | explain | `--stage explain --date D` (or `--timestamp "D HH:MM"`, repeatable) | Grad-CAM on the hottest and coldest cells of every snapshot hour, and (default) their aggregate | `explain/<D_HHMM>/`, `explain/<D>_all/` |
 | tune | `--stage tune` | Bayesian hyperparameter search with nested spatial CV (slow) | `tuning/<id>/` |
 | rasters | `--stage rasters` | builds the Master GeoTIFF from the source layers (one-off) | `processed/rasters/` |
@@ -299,7 +300,7 @@ python -c "import numpy as np, pandas as pd; z=np.load('processed/pm25_hourly.np
 
 **How long a map takes.** `infer` predicts every cell of the raster: 10.6 million cells at the full 10 m grid. On a
 4-thread CPU the model does roughly 300-800 cells/s (it varies with load), so one full-resolution snapshot takes
-**4 to 10 hours**. A day of four snapshots costs much less than four times that: every chunk of cells computes its CNN
+**4 to 10 hours**. A day of snapshots costs much less than the number of hours times that: every chunk of cells computes its CNN
 embedding once and reuses it for all hours of the date (measured on a 202,500-cell window of the real raster: 315 s instead
 of 1,076 s for four hours, 3.4x faster, identical output), so a full-resolution day is roughly 4-5 hours on this CPU. The
 run prints an estimate after the first chunk and progress lines afterwards, so you know before the long part starts. Choose the grid with `inference.stride_px` (odd values):
@@ -325,7 +326,7 @@ the five stations are farther away than in 2025 (OpenAQ is the sparser network: 
 OpenAQ stations alone. The by-year table in `SUMMARY.md` (section 5) shows how the test stations fared in 2026 (OpenAQ stations only).
 The option affects maps and Grad-CAM only: it does not change training, preprocessing or the test rows.
 
-`--date` expands to the four hours in `configs/inference.yaml` (`snapshot_hours: [8, 12, 17, 21]`);
+`--date` expands to the hours in `configs/inference.yaml` (`snapshot_hours`, **all 24 by default**; `[8, 12, 17, 21]` gives the four peak hours, six times faster);
 `--timestamp "2025-07-01 12:00"` (repeatable) gives explicit hours. Results go to
 `snapshots/<run_id>/surface/20250701/`:
 
@@ -539,6 +540,12 @@ The switches most often wanted:
 | neighbours used for map cells | `inference.lag_reference` | `train`, `all` |
 | OpenAQ-only history from a year on | `inference.openaq_only_from_year` | `2026`, `null` (off) |
 | predict a coarser grid | `inference.stride_px` (odd) | `1`, `3`, `5` … |
+| which hours of a date get a map (and the animation) | `inference.snapshot_hours` | all 24 (default), `[8, 12, 17, 21]` |
+| which hours Grad-CAM explains (slow) | `inference.explain_hours` | `[]` (default) = every snapshot hour, `[8, 12, 17, 21]` |
+| the day animation / slideshow | `output.animation.enabled` / `.fps` / `.formats` | `true`, `2`, `[gif, mp4, html]` |
+| train without any PM2.5 history (the morphology diagnostic, [2.19](#219-the-no-pm25-history-diagnostic-does-the-morphology-carry-signal-on-its-own)) | `data.temporal.use_pm25_lags` | `true` (default), `false` |
+| start training from pretrained weights / keep parts fixed (transfer learning, [2.20](#220-transfer-learning-of-the-temporal-side-other-cities--manila)) | `train.init_from`, `train.freeze` | `null` / `[]` (default), a `.pt` path / `[temporal]` |
+| pretrain on other cities (`--stage pretrain`) | `transfer.sources`, `.top_k_stations`, `.exclude_months`, `.epochs` | see `configs/transfer.yaml` |
 | basemap sources | `output.basemap.enabled`, `.web_tiles`, `.vector_layers`, `.strict` | `true`, `true`, `true`, `false` |
 | run LISA even if the global test is not significant | `report.bias.local_only_if_global_significant` | `true`, `false` |
 
@@ -666,6 +673,9 @@ The notebook at the repository root trains and compares four models of one datas
 | `cnn_geocp` | yes | yes | 54 + 13 calibration |
 | `nocnn_geocp` | no (LSTM only) | yes | 54 + 13 calibration |
 
+Cell 1 also sets the hours: `INFER_HOURS` (default all 24: the maps, the animation and the slideshow of each date) and `EXPLAIN_HOURS` (default all 24: the hours Grad-CAM explains, among `INFER_HOURS`; `SHOW_HOURS` picks which of them the figures cell displays).
+A date mapped earlier with other hours is mapped again. An optional diagnostic pair, `cnn_nolags` and `nocnn_nolags` (no PM2.5 history, see [2.19](#219-the-no-pm25-history-diagnostic-does-the-morphology-carry-signal-on-its-own)), can be added to `RUN_VARIANTS`.
+
 `RUN_VARIANTS` (cell 1) lists the models to run, in order (the most important first); `MAPS_FOR` lists the ones that also get maps and
 Grad-CAM (default `cnn_nogeocp`; they need the CNN branch). Comparing a row of the table says what the morphology adds, comparing a column
 says what holding the calibration stations out costs. Each model has its own `checkpoints_<name>/` and `snapshots_<name>/` under
@@ -688,8 +698,7 @@ starts again. To continue in another session: *Save Version*, then *Add Input* �
 steps are skipped. Changing a model or training setting between sessions makes a finished run count as stale and be retrained
 (`RETRAIN_IF_CONFIG_CHANGED`); do not change them while a run is half done. To redo something on purpose put its name in `REDO`.
 
-**Grad-CAM over the four snapshot hours.** `python run_pipeline.py --stage explain --date 2025-07-23` explains every snapshot hour
-(`explain/20250723_0800/` … `_2100/`) and, by default (`output.explain.aggregate`), pools them into `explain/20250723_all/`:
+**Grad-CAM over the explained hours.** `python run_pipeline.py --stage explain --date 2025-07-23` explains the hours in `inference.explain_hours` (default `[]` = every snapshot hour, so **all 24** of the day; see [2.18](#218-a-whole-day-of-maps-an-animation-and-a-slideshow)) (`explain/20250723_0800/` … `_2100/`) and, by default (`output.explain.aggregate`), pools them into `explain/20250723_all/`:
 
 | File | Shows |
 |---|---|
@@ -697,7 +706,7 @@ steps are skipped. Changing a model or training setting between sessions makes a
 | `gradcam_band_swarm.png`, `gradcam_band_importance.png`, `gradcam_band_swarm.csv` | the SHAP-style swarm and bars, the sampled NCR cells of all hours pooled (cell-hours) |
 | `band_ablation.png`, `band_ablation_swarm.png`, `band_ablation.csv` | the impact counterpart (swap a band, see the prediction move), pooled |
 | `gradcam_band_by_hour.png`, `.csv` | mean \|attention\| per band for each hour and for all hours: are the hours alike? |
-| `gradcam_hot_cells.png`, `gradcam_cold_cells.png`, `gradcam_*_row.png`, `gradcam_map.png` | the hot and cold cells of the **average** of the day's four snapshots, with the Grad-CAM **averaged over the hours** |
+| `gradcam_hot_cells.png`, `gradcam_cold_cells.png`, `gradcam_*_row.png`, `gradcam_map.png` | the hot and cold cells of the **average of the explained hours**, with the Grad-CAM **averaged over those hours** |
 
 A finished hour is reused (`output.explain.redo: true` redoes it); `output.explain.aggregate: false` gives the hours only. `--timestamp` (repeatable)
 explains single hours the same way. Nothing is recomputed for the pooled figures: they read the tables the hours already wrote.
@@ -727,7 +736,116 @@ largest size lies above the draw-to-draw spread of the gap at the smallest.* Sug
 nested within a draw, and trained both models on the same subset. The accuracy of a size is the mean over draws, the CNN effect is the paired difference between models within a draw,
 and the spread across draws shows how much of the curve is due to which stations were sampled. The 16 test stations are the same at every point."
 
+### 2.17 The dataset report
+
+`python run_pipeline.py --stage dataset` (add the same `--override` data paths as for the other stages) writes `dataset_report/` next to the processed folder; start with
+`DATASET_REPORT.md`. It reads the raw sensor files with the same cleaning as `preprocessing/clean_loader.py` and the processed folder for the partitions and model rows, and trains nothing:
+
+| Part | What it reports |
+|---|---|
+| sensors and coverage | every sensor of the locations table, inside the raster or not, its network (OpenAQ / QC) and partition; the NCR share the raster covers |
+| rows | readings in the files, not numeric, outside the allowed range, usable, hours with a reading, hours filled by interpolation, hours left missing, model rows, and the hours that have no model row; sensors with readings but no model rows are named |
+| missingness | per sensor: the share of its active span with no reading and the longest gap (`dataset_sensors.csv`) |
+| temporal availability | per year: sensors per network, station-hours, sensors reporting at the same hour; `fig_availability.png` is a sensor × month heatmap |
+| PM2.5 distribution | mean, spread, percentiles, share above 35 and 50 µg/m³, per network (`fig_pm25_distribution.png`) |
+| morphology | each of the five bands over the NCR (10 m pixels and 320 m patch means) and at the sensors' own patches, and how much of the NCR's range the sensors span (`fig_morphology.png`, `dataset_morphology_*.csv`) |
+
+On the data of the four-model runs: 84 sensors inside the raster (44 OpenAQ from 2024-08, 40 QC to 2025-12-31), 1.21 M usable readings, 1.35 M hours with a value once short gaps are filled,
+1.31 M model rows; median missing share 0.3 % for QC and 31 % for OpenAQ; the sensors span 73 to 91 % of the NCR patches' 5th–95th percentile range of each band (92 to 98 % of the full range).
+
 ---
+
+### 2.18 A whole day of maps, an animation and a slideshow
+
+`--stage infer --date D` now predicts **all 24 hours** of the day by default (`inference.snapshot_hours`, one band per hour in `prediction_volume.tif`, a true 24-hour mean in
+`prediction_daily_mean.tif`). Beside the hourly maps, `maps/` gets, for each style in `output.maps.styles` (`continuous` and `aqi` by default):
+
+| File | What it is |
+|---|---|
+| `<style>_panels.png` | the 24 hours on one colour scale, 4 rows × 6 columns (up to 6 hours keep the old 2-column layout) |
+| `<style>_animation.gif` | the day as a looping animation, one frame per hour, one colour scale for all frames (`output.animation.fps`, default 2: a day in 12 s) |
+| `<style>_animation.mp4` | the same, smaller, for slides; only written when `pip install imageio imageio-ffmpeg` is available (otherwise a one-line notice) |
+| `<style>_slideshow.html` | one page with play / pause and a slider over the hours; keep it next to the PNGs |
+
+The animation only re-assembles the hourly PNGs that `render_day` already drew, so it costs nothing extra to predict. Settings: `output.animation` (`enabled`, `fps`, `formats`, `hold_last_s`).
+**The cost is the 24 predictions:** a day takes six times as long as four hours (every chunk of cells serves all hours of a date, so a little less than six). Use
+`--override "inference.snapshot_hours=[8,12,17,21]"` for the old four-hour day.
+
+**Grad-CAM covers the whole day too.** `--stage explain --date D` explains `inference.explain_hours` (default `[]` = every snapshot hour, so all 24 hours and their aggregate). Each explained hour is slow,
+so a full day costs six times the four-hour one; `--override "inference.explain_hours=[8,12,17,21]"` gives the four peak hours. The hours must be among the day's `infer` hours. The hot and cold cells of the pooled figures come from the mean of **exactly the explained hours** (read from the day's volume), so a cell's
+mean prediction and its averaged Grad-CAM describe the same hours.
+
+The XGBoost branch does the same: `python run_pipeline.py --stage infer --date D` makes all 24 hours (`XGB_SNAPSHOT_HOURS=8,12,17,21` for the old set), a 4 × 6 panel and
+`animation_<day>.gif` + `slideshow_<day>.html` in the day's folder, drawn on one shared scale. The full 10 m grid (`infer10`) stays at four hours (one 10 m snapshot is ~10.6 million cells).
+
+### 2.19 The no-PM2.5-history diagnostic: does the morphology carry signal on its own?
+
+The learning curve and the four models show that the CNN branch adds nothing **on top of** the PM2.5 lags and the spatial lag. They do not say whether morphology carries signal at all,
+or is simply redundant with those lags (a station's own recent readings already reflect what its surroundings do). `data.temporal.use_pm25_lags: false` removes the PM2.5 lags and the spatial lag:
+the temporal branch then sees only the hour of day (`sin_hour`, `cos_hour`), so the **only** way to tell stations apart is the morphology. Train the CNN-LSTM and the LSTM-only model under
+this setting and compare their test R²:
+
+| result | reading |
+|---|---|
+| CNN-LSTM clearly above LSTM-only | the morphology carries signal on its own; it is redundant once the lags are in (the usual reading). Other cities' morphology would help only a model without history |
+| the two about equal | the morphology carries little signal here, even with no other information: building the five bands for other cities is not worth the weeks |
+
+`training_cells.ipynb` runs it: add `"cnn_nolags"` and `"nocnn_nolags"` to `RUN_VARIANTS` (GeoCP off, no maps; both share `processed_nolags/`). Without lags the model needs no history, so every
+hour with a reading is a row (about 1.35 million rows at 20 stations against 295 thousand test rows with the lags): compare the two diagnostic models with **each other**, not row for row with the others.
+These models are far less accurate than the lag models by design; the diagnostic is the **gap**, not the level.
+
+### 2.20 Transfer learning of the temporal side (other cities → Manila)
+
+The CNN branch adds no accuracy, so transfer goes to the temporal side (LSTM on PM2.5 history). The group decided that weather and forecasting ahead in time are out of scope, so the model
+transfers **PM2.5 history only**.
+
+1. **Get the source data** (`other-country-scrapers/`). `scrapers.ipynb` (VS Code or Jupyter) downloads hourly PM2.5 of stations in Ho Chi Minh City and Hanoi (Vietnam), Bangkok (Thailand), Jakarta
+   (Indonesia) and Kuala Lumpur (Malaysia) from **one site, the OpenAQ API v3** (`/locations` to find the stations, `/sensors/{id}/hours` for the values), and writes
+   `data/Other Countries/<country>/<city>/{sensors/openaq_<id>_<name>.csv, locations.csv, station_quality.csv, source.json}` in the Manila layout. You need a **free OpenAQ key**
+   (<https://explore.openaq.org/register>) in the environment variable `OPENAQ_API_KEY`; free keys allow 60 requests a minute and 2,000 an hour, the scraper stays under both and resumes where it stopped
+   (`DRY_RUN = True` first prints the number of stations and the estimated time). A station is kept with at least 6,000 hours, readings in 12 different months and 50 % of the hours between its first and
+   last reading present; `station_quality.csv` lists every station with the reason it was kept or dropped. Hours are labelled by their start (`TIME_LABEL = "from"`): compare one value with a Manila
+   file before mixing the networks. Tests of the scraper (a fake API, no key): `python -m pytest other-country-scrapers/tests -q`.
+2. **Pretrain** (`--stage pretrain`, `configs/transfer.yaml`, `model/transfer/`). The windows of the source cities are built by the same functions as Manila's (lags, spatial lag among the stations
+   of the same city, local hour of day), scaled with **Manila's scalers** (run `--stage preprocess` first), and an LSTM-only model is trained on them with early stopping on held-out source stations.
+   `python run_pipeline.py --stage pretrain --name vn_th --source vietnam/hanoi --source thailand/bangkok` writes `<data.paths.pretrained_dir>/vn_th/pretrained_lstm.pt`, `summary.json` and
+   `station_ranking.csv` (every source station by its distance to the Manila training stations: maximum mean discrepancy on log PM2.5 and the hour of day; `transfer.top_k_stations` keeps the closest k).
+   `transfer.exclude_months` leaves calendar months out (for example 2 to 4, the regional burning season): an option to test, not a default.
+3. **Fine-tune** on Manila: `--stage train --override model.spatial_cnn.enabled=false --override train.init_from=<pretrained_lstm.pt>`. `train.init_from` copies every layer whose name and shape
+   match (an LSTM-only model loads all of it; a CNN-LSTM loads the temporal branch and leaves the CNN and fusion head fresh) and **stops** if the temporal branch does not match completely.
+   `train.freeze: [temporal]` keeps parts fixed (any of `spatial`, `temporal`, `head`). The default (`null`, `[]`) changes nothing. `run_info.json` records what was loaded and frozen.
+4. **Compare** (`transfer_learning.ipynb`, Kaggle or local). It runs the checkpoints `manila_only`, `single_<country>` (one per country), `mmd_top_<k>` and `all_sources`, each as `finetune`,
+   `head_only` (the pretrained LSTM frozen) and `zero_shot` (one pass at learning rate 0), all scored on the **same 16 Manila test stations**, and writes `transfer_comparison.csv` and a figure.
+   Judge a checkpoint by `finetune` against `manila_only`; `all_sources` against the ranked subset shows negative transfer if there is any.
+
+**XGBoost does the same** with a booster instead of a network (`xgboost/training/transfer.py`, commented for review): `python run_pipeline.py --stage pretrain --pretrain-arm A --source ...` builds the
+temporal features (the lags, rolling statistics and calendar encodings of `prep.py`) from the source cities, fills the morphology columns with NaN (XGBoost handles missing values), trains a booster and
+saves `outputs/pretrained/<name>/pretrained_booster.json`; with `XGB_INIT_FROM=<that file>` the `test` stage and the production fit **add** the Manila trees on top of the pretrained ones. Use the
+same arm on both sides (the trees read the columns by position); arm A (time + PM2.5 history, no morphology) is the temporal-only choice.
+
+**Choosing the pool without the test stations.** `transfer_learning.ipynb` has `USE_CV` (default `True`). Every checkpoint is then fitted with the same spatial cross-validation as the
+main notebook (3 folds over the Manila training stations, the pretrained weights loaded afresh in each fold; the pretraining never sees Manila, so nothing leaks). The pool is ranked by its
+**CV R²** and by in how many folds it beats `manila_only`; its **test R² is read once, after the choice**. Cost: about four times a plain fit (minutes for an LSTM-only model); the
+`zero_shot` variant is never cross-validated. `USE_CV = False` compares on the test stations directly (quick, but the winner's test score is then a little optimistic: say so if you report it).
+
+**What was checked.** Unit tests for each piece (warm start, freezing, source windows, station ranking, the pretrain stage, the scraper, the XGBoost module; `tests/test_transfer.py`,
+`checks/test_transfer.py`), and a full chain on real Manila data with a synthetic source city (preprocess, pretrain, `finetune` / `head_only` / `zero_shot`, report). **Not run:** the real source cities
+(it needs your OpenAQ key and hours of downloading), so there is no transfer result yet.
+
+### 2.21 The transfer-learning reference (`transferlearn.pdf`): what holds and what to change
+
+The file is a chat with an AI assistant, not a source. What was checked, and what it means for the thesis:
+
+- **Holds:** transferring the temporal side; OpenAQ as the data source; a single-country baseline before pooling; a ranking of stations by distribution distance instead of choosing countries by hand;
+  a completeness floor over a full year; the four-checkpoint ablation (Manila-only, one country, ranked subset, all stations) to show negative transfer; excluding the burning season **as an option to test**.
+- **Wrong or unverifiable:** the Zenodo "Ho Chi Minh City" and "Bangkok" hourly datasets are **CAMS model output served by Open-Meteo**, not sensor measurements (a 53 kB file for HCMC): do not use them as ground truth.
+  The Nanjing paper (Kokkonen et al. 2021, *Environ. Sci.: Atmos.* 1(7):481) is quoted as showing that morphology has little effect; it found that morphology explained **up to 73 %** of the variance of PM2.5
+  in street canyons (13 % in open areas); R² 0.076 belongs to distance to major roads alone. "Indriyati et al. 2025" is Musa, Adhi and Mulsandi (*Jurnal Meteorologi dan Geofisika* 26(1):37-54), and the page-48 quotation
+  was not verified. Aziim et al. (2026, *Front. Environ. Sci.* 14:2000424) and Lung et al. (2022, *IJERPH* 19(3):1522) exist; Rakholia et al. (2022) is *Urban Climate* 46:101315 (its title in the file is wrong).
+  "k = 8 to 15 stations" has no source. The data of this thesis are OpenAQ and Quezon City stations, not Raspberry Pi or mobile nodes.
+- **Out of scope here:** weather (humidity correction, ERA5, boundary-layer height) and any forecasting ahead in time, by group decision. Where the file leans on them, only the PM2.5-history part is used.
+- **Applies to both models:** the CNN-LSTM transfers its temporal branch (the morphology branch is off, there are no rasters abroad); XGBoost continues boosting from a booster trained on the temporal features.
+  The morphological transfer the file starts from (Taiwan and dense street canyons first) is **not** supported by our results (the CNN branch adds no accuracy); the file's own second answer drops it.
 
 ## 3. How it works
 
@@ -1105,28 +1223,119 @@ Runs of 4 November 2026 (`training_cells.ipynb`, dataset `from_2023_with_preinst
 - **Data is the lever.** Transfer learning pays only if it adds distinct stations or conditions. Other Southeast Asian cities would; the risks are different sensors, sources and
   climate, and that each city needs the same five morphology bands built first.
 - **The temporal side needs no rasters** to transfer: pretrain the LSTM and the lag model on other cities' hourly PM2.5 and fine-tune on Manila.
-- **The model sees only PM2.5.** Adding meteorology (wind, rain, humidity, boundary-layer height) is likely the largest single accuracy gain; repeating the previous hour already gives 0.646.
+- **The model sees only PM2.5 history** (three lags, the spatial lag and the hour), and repeating the previous hour already gives R² 0.646. Weather inputs and forecasting ahead in time are
+  out of scope for this thesis (group decision, November 2026), so the model stays a PM2.5-only estimator of present conditions.
 
 ### 8.3 The plan, in order of cost against information
 
 | step | what | cost | it tells you |
 |---|---|---|---|
 | 1 | learning curve: both models on 20, 40, 54, 67 Manila stations (`learning_curve.ipynb`, [2.16](#216-learning-curve-learning_curveipynb)) | hours, no new data | whether more stations make the CNN pay off, and whether the LSTM-only gains from more stations |
-| 2 | add meteorology | an ERA5 download | the likely largest R² gain |
-| 3 | pretrain the LSTM on other cities' hourly PM2.5, fine-tune on Manila | no rasters needed | whether the temporal part transfers |
-| 4 | pretrain the CNN-LSTM on other Southeast Asian cities, fine-tune on Manila | five morphology bands per city: weeks | the adviser's main idea |
+| 2 | pretrain the LSTM on other cities' hourly PM2.5, fine-tune on Manila | no rasters needed | whether the temporal part transfers |
+| 3 | pretrain the CNN-LSTM on other Southeast Asian cities, fine-tune on Manila | five morphology bands per city: weeks | the adviser's main idea |
 | (ablation) | a ViT or another backbone | a configuration change | expected negative; report it |
 
 ### 8.4 Is step 1 redundant?
 
 Partly, and it depends on what it is for.
 
-- **It gates only step 4.** Steps 2 and 3 do not depend on it: run them regardless. Step 1 decides whether the expensive morphological transfer (weeks of raster building) is worth it.
+- **It gates only step 3.** Step 2 does not depend on it: run it regardless. Step 1 decides whether the expensive morphological transfer (weeks of raster building) is worth it.
 - **It is cheap, needs no new data, and gives two curves.** The gap (CNN-LSTM minus LSTM-only) answers the morphological question. The LSTM-only curve alone answers the temporal one: if it keeps rising
-  with the number of stations, more stations or cities should help step 3 too; if it is flat, expect little from transfer there.
-- **A flat or negative gap is a strong reason not to build step 4**, and a positive trend is a reason to; either result is a thesis result and answers "why transfer?" at the defence.
+  with the number of stations, more stations or cities should help step 2 too; if it is flat, expect little from transfer there.
+- **A flat or negative gap is a strong reason not to build step 3**, and a positive trend is a reason to; either result is a thesis result and answers "why transfer?" at the defence.
 - **Its limits.** A trend over 20 to 67 stations is an extrapolation to hundreds, and it cannot test domain shift (other sensors, sources, climate). A positive result is necessary
   evidence, not sufficient.
-- **When it is redundant.** If you will do step 4 whatever step 1 says, step 1 has no decision value, because step 4 contains its own comparison with and without morphology. Then
+- **When it is redundant.** If you will do step 3 whatever step 1 says, step 1 has no decision value, because step 3 contains its own comparison with and without morphology. Then
   run it only as context, with fewer draws (for example sizes 20, 40 and all, 2 draws).
+
+### 8.5 Result of step 1: the learning curve (run locally, 10 to 12 November 2026)
+
+Both models trained on 20, 40, 54 and all 67 training stations (`data.split.train_subset`, seed 0, one draw per size, nested subsets), GeoCP off, no cross-validation, fixed epochs
+(CNN-LSTM 7, LSTM-only 15), scored on the same 16 test stations (about 295 k rows). Run with the same code and settings as `learning_curve.ipynb`, outputs in `Outputs/learning_curve/`
+(`learning_curve.csv`, `learning_curve_gap.csv`, `learning_curve.png`, per-size runs under `lc/`). The CNN-LSTM fits took about 1 to 6 h each, the LSTM-only fits 3 to 6 min.
+
+| training stations | CNN-LSTM test R² | LSTM-only test R² | gap (CNN-LSTM − LSTM-only) | CNN-LSTM RMSE | LSTM-only RMSE |
+|---|---|---|---|---|---|
+| 20 | 0.7089 | 0.7164 | −0.0075 | 5.530 | 5.458 |
+| 40 | 0.7123 | 0.7180 | −0.0058 | 5.501 | 5.446 |
+| 54 | 0.7106 | 0.7239 | −0.0133 | 5.515 | 5.387 |
+| 67 (all) | 0.7173 | 0.7240 | −0.0067 | 5.451 | 5.386 |
+
+- **The CNN branch does not pay off as stations grow.** The gap is negative at every size (−0.006 to −0.013) and does not rise across sizes, so the rule written in 2.16 ("the mean gap rises
+  across sizes") is not met. This agrees with the four-model comparison (8.1: gap −0.003 without GeoCP).
+- **Both models improve slowly with stations**, by about the same amount: +0.008 R² from 20 to 67 stations for each (CNN-LSTM 0.709 → 0.717, LSTM-only 0.716 → 0.724). More Manila stations
+  therefore do not close the gap; the LSTM-only model stays ahead.
+- **The curves are nearly flat.** The change from 20 to 67 stations (+0.008) is small next to the previous-hour baseline (R² 0.646) and to the difference between the LSTM and that baseline (+0.078).
+- **The 67-station points agree with the earlier full-data runs** (CNN-LSTM 0.717 here against 0.721, LSTM-only 0.724 against 0.724), so the pipeline reproduces.
+- **Limits.** One draw per size, so station-sampling variability is not measured; differences of about 0.005 are within what another draw could change. The 16 test stations are fixed, the full-size point has
+  no subset variability, and 20 to 67 stations says little about hundreds. Read it as consistent evidence, not as a proven absence of any effect.
+- **Consequence for the plan (8.3):** the morphological transfer (step 3) is the weakest bet, because neither the four-model comparison nor the learning curve shows the CNN branch adding accuracy,
+  and more stations alone do not change that. Step 2 does not depend on this result.
+
+### 8.6 Is transfer learning on the temporal side alone enough?
+
+Yes, as the main transfer-learning contribution, on the evidence so far; with three conditions.
+
+- **Why it is enough.** The accuracy comes from the temporal side: the previous hour gives R² 0.646, the LSTM adds 0.078, the CNN branch adds nothing (−0.003 to −0.011 in the four-model comparison, negative at
+  every size in 8.5). Transfer should go where the skill is.
+- **It is cheaper.** It needs only other cities' hourly PM2.5 series, no morphology rasters (weeks per city). The LSTM-only model has 169 k parameters and trains in minutes, so pretraining and
+  fine-tuning runs can be repeated.
+- **Condition 1: expect a modest gain.** The LSTM-only curve rises by only +0.008 R² from 20 to 67 stations, so more stations of the same kind buy little. A gain from other cities comes from new conditions
+  (sources, seasons, extremes) rather than from the count; the peaks above 30 µg/m³ give 51 % of the squared error (8.1), and that is where other cities could help.
+- **Condition 2: test against the right baselines**, on the same 16 test stations: Manila-only LSTM (0.724), pretrained then fine-tuned, pretrained and not fine-tuned (zero-shot), and the previous-hour baseline.
+  Report negative transfer if it occurs (other sensors, sources and climate can hurt).
+- **Condition 3: keep the story consistent.** The thesis finding is then "morphology bands did not add accuracy over the temporal model at 20 to 67 stations; the accuracy is temporal; transfer
+  targets the temporal side". The CNN-LSTM, Grad-CAM and band ablation stay as the analysis of what the morphology branch learned, not as the accuracy claim. If the adviser wants the morphological
+  transfer, step 3 remains possible, but this evidence does not support its cost.
+
+### 8.7 Manuscript: sections to add to the table of contents
+
+Written against the table of contents of the manuscript (chapters 1 to 4 as pasted). Numbers are suggestions that follow the existing numbering. Weather inputs and
+forecasting ahead in time are out of scope (group decision, November 2026), so there are no sections for them. Search strings are for Google Scholar, Scopus or OpenAlex; add `PM2.5` and `"Southeast Asia"` where it narrows the field. Verify every paper yourself before citing it.
+
+**Review of Related Literature (chapter 2)**
+
+| # | Section | What to write (from our work) | Search keywords |
+|---|---|---|---|
+| 2.3.3 | Morphology against temporal drivers of PM2.5 | The mixed evidence: morphology explains between-site variation (Kokkonen et al. 2021, Nanjing: up to 73 % in street canyons, 13 % in open areas) but hourly prediction is dominated by recent readings (Deep-AIR, Zhang et al. 2022, found historical PM2.5 the best predictor). Sets up why we test the branch rather than assume it helps. | `urban morphology PM2.5 spatial variation street canyon`, `built environment land use regression PM2.5 explained variance`, `temporal versus spatial predictors PM2.5 hourly prediction`, `feature importance lagged PM2.5 deep learning` |
+| 2.4.5 | Data quantity, learning curves and model capacity | Why a learning curve answers "does the CNN need more stations?"; power-law shape, ill-behaved curves; small training sets inflate validation optimism for CNNs. Backs the learning-curve test (4.4.5). | `learning curve training set size generalization`, `shape of learning curves review`, `scaling laws deep learning data size`, `sample size convolutional neural network small dataset remote sensing`, `spatial autocorrelation inflates CNN performance` |
+| 2.4.6 | Transfer learning in air-quality modelling | Pretraining on data-rich cities, fine-tuning on a target city; negative transfer; domain shift (sensors, climate, sources); partial transfer (temporal side only). | `transfer learning air quality prediction cross-city`, `PM2.5 forecasting transfer learning data-scarce city`, `domain adaptation air pollution low-cost sensors`, `negative transfer spatiotemporal`, `pretrain fine-tune LSTM PM2.5`, `Maximum Mean Discrepancy source selection transfer` |
+| 2.4.7 | Benchmarks and significance testing | Persistence (previous hour) as the benchmark, skill score, paired bootstrap over stations; why a model that merely matches persistence has no added value. | `skill score persistence baseline air quality`, `paired bootstrap spatial cross-validation stations`, `Diebold-Mariano test model comparison`, `persistence benchmark PM2.5 machine learning` |
+| 2.4.8 | Explainable deep learning for environmental maps | Grad-CAM and SHAP on spatial inputs; saliency is a sensitivity, not a cause; disagreement between attention and perturbation. | `Grad-CAM remote sensing regression`, `SHAP spatial deep learning environmental`, `saliency maps reliability sanity checks`, `feature attribution perturbation versus gradient disagreement` |
+| 2.5 | Synthesis (extend) | State the gap: morphology-aware CNN-LSTMs are reported to help, but few studies test the CNN branch against a temporal-only model on unseen stations, with a learning curve. | `ablation study CNN-LSTM air quality unseen stations`, `spatial leave-station-out PM2.5 deep learning` |
+
+**Theoretical Framework (chapter 3)**
+
+| # | Section | Content |
+|---|---|---|
+| 3.3.4 | Transfer learning | Source and target domains, pretraining, fine-tuning, freezing, warm-start boosting for XGBoost, domain shift, negative transfer, station selection by distribution distance. |
+| 3.4.4 | Baselines, skill scores and paired comparison | Persistence baseline (previous hour), skill = 1 − MSE ratio, paired bootstrap over test stations, error correlation between models, simple average of two models. |
+| 3.4.5 | Learning curves and branch ablation | Definition, nested training subsets, draws as station-sample replicates, paired gap between the two models, a decision rule written before the run; the 2 × 2 design (CNN branch yes/no × GeoCP yes/no). |
+| 3.6 | Model interpretability (new, now only in 4.6.4) | Grad-CAM, band swarm, band ablation, what each does and does not show. |
+
+**Methodology (chapter 4)**
+
+| # | Section | Content |
+|---|---|---|
+| 4.1.4 | Source-domain data acquisition | OpenAQ v3 stations in Vietnam, Thailand, Indonesia and Malaysia; completeness rules; licences. Note that the Zenodo HCMC and Bangkok sets are CAMS model output, not measurements. |
+| 4.2.6 | Harmonisation and source-station selection | Units, time zones, completeness floor, optional exclusion of biomass-burning months, distance to the Manila distribution. |
+| 4.3.4 | Transfer-learning procedure | Pretraining the temporal branch, fine-tuning, morphology branch off or frozen; XGBoost warm start; the four checkpoints (Manila-only, single country, ranked subset, all sources). |
+| 4.3.5 | CNN-branch ablation (the four-model design) | `training_cells.ipynb`: CNN-LSTM and LSTM-only, with and without GeoCP; resume rules. |
+| 4.4.4 | Baselines and paired comparison | Previous-hour baseline, bootstrap of 2,000 resamples over the 16 test stations, error correlation, 50/50 average, error concentration above 30 and 50 µg/m³, residual Moran's I. |
+| **4.4.5** | **Learning-curve experiment** | **Sizes 20, 40, 54 and 67 training stations; nested seeded subsets; both models on the same subset; same 16 test stations; fixed epochs (7 and 15); the rule for "the CNN benefits from more stations"; result: negative gap at every size (−0.006 to −0.013 R²); limits (one draw per size).** |
+| 4.4.6 | Morphology diagnostic (no PM2.5 lags) | Both models without the lag channels, to separate "morphology carries no signal" from "morphology is redundant with the lags" ([2.19](#219-the-no-pm25-history-diagnostic-does-the-morphology-carry-signal-on-its-own)). Built and tested, not run on the full data yet. |
+| 4.4.7 | Transfer-learning evaluation | Same test stations; baselines; zero-shot against fine-tuned; negative-transfer check. |
+| 4.6.2 | Snapshot series (extend) | All 24 hours by default; Grad-CAM keeps its own hours (`inference.explain_hours`). |
+| 4.6.4 | Interpretability (extend) | Add the band ablation and the pooling of Grad-CAM over hours. |
+| 4.6.5 | Day animation and slideshow | How the 24 hourly maps become a GIF, MP4 and slideshow on one colour scale. |
+
+**Results chapter (not in the pasted contents): the tests we ran that need a place.** Four-model comparison (CV and test R², RMSE, MAE); paired bootstrap; previous-hour baseline
+and skill; error concentration; Moran's I of the residuals; Grad-CAM and band ablation (attention and impact disagree); the learning curve (8.5); the dataset report (availability,
+coverage, morphology representativeness); training behaviour (best epoch, parameter counts, the overfitting reading). The learning curve and the four-model comparison are the two
+experiments that support one claim: **the morphology branch adds no measurable accuracy over the temporal model**. Word it so: "the CNN branch did not improve accuracy at 20 to 67
+training stations", not "morphology has no effect on PM2.5", which these tests do not show (8.1, and the no-lag diagnostic in 4.4.6 is what would sharpen it).
+
+**Checked: tests in this work that belong in chapter 2 (as literature to justify them), not only in the methods:** the learning curve (2.4.5), the persistence baseline and skill score
+(2.4.7), the paired bootstrap (2.4.7), spatial validation without leakage (already 2.3 to 3.4, add the CNN-inflation evidence), Grad-CAM and perturbation (2.4.8), the ablation design (2.5),
+residual Moran's I (already in 3.4.3 and 4.4.3).
 

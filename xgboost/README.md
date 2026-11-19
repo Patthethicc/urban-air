@@ -474,7 +474,9 @@ Turn it on for a sensitivity row: `set XGB_CLEAN_NYE=on`. Numbers from
 ## Maps, and the optional basemap
 
 `--stage infer` writes, per date: the per-cell CSV and GeoTIFF, an AQI-tier map, a **continuous-gradient**
-map, a 2x2 **panel** of the four snapshot hours on one shared colour scale, and a **24-hour mean**.
+map, a **panel** of the snapshot hours on one shared colour scale (all **24 hours** of the day by default, in a 4 × 6 grid; `XGB_SNAPSHOT_HOURS=8,12,17,21` gives the old four-hour 2 × 2 panel), a
+**24-hour mean**, and the day as an **animation** (`animation_<day>.gif`) and a **slideshow** page (`slideshow_<day>.html`, play / pause and a slider), each frame drawn on the same colour scale
+(`maps/animation.py`). A 24-hour day takes six times as long as four hours. The full 10 m grid (`infer10`) stays at four hours.
 
 The gradient is the point. AQI tiers (0-25 / 25-35 / ...) put nearly every cell of this pipeline's output in
 the same "Good" bin, so the tiered map reads as one flat colour; the continuous scale is derived from the
@@ -488,6 +490,24 @@ fetch fails the maps render on plain axes instead of breaking.
 
 `contextily` is still preferred when present. Set `basemap.configure(web_tiles=False)` for a fully offline
 render.
+
+## Transfer learning from other cities (optional, PM2.5 history only)
+
+Pretrain on other Southeast Asian cities' hourly PM2.5, then **continue boosting on Manila**. The data come from `other-country-scrapers/scrapers.ipynb` (OpenAQ API v3, a free key in `OPENAQ_API_KEY`),
+into `data/Other Countries/<country>/<city>/`. The code is `training/transfer.py` (commented line by line, for review). No weather, no forecasts: the group decided they are out of scope.
+
+```powershell
+python run_pipeline.py --stage pretrain --pretrain-arm A --name vn_th --source vietnam/hanoi thailand/bangkok
+$env:XGB_INIT_FROM = "outputs/pretrained/vn_th/pretrained_booster.json"
+python run_pipeline.py --stage test --test-arm A          # Manila trees are ADDED to the pretrained ones; scored on the same test cells
+Remove-Item Env:XGB_INIT_FROM                              # back to the ordinary fit
+```
+
+- The source cities have no morphology, so the morphology columns (and the interactions that need them) are NaN in the pretraining rows; XGBoost handles missing values natively.
+- The trees read the columns **by position**, so pretrain and fine-tune with the **same arm** (A = time + PM2.5 history is the temporal-only choice); a booster with another feature count is refused.
+- The temporal features mirror `preprocessing/prep.py` (lags 1-4, 24 h and 72 h rolling mean and standard deviation of the previous hours, hour / weekday / month as sin and cos). The New Year fireworks
+  hours that the Manila pipeline drops are **not** removed from the source series.
+- Compare `XGB_INIT_FROM` set against unset on the **same** test cells, and report negative transfer if it occurs. Tests: `python -m pytest checks/test_transfer.py` (they need the `xgboost` package, not the Manila data).
 
 ## The 10 m surfaces, in the CNN-LSTM's cartography
 

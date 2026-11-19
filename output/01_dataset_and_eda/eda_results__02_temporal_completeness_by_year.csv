@@ -1,0 +1,86 @@
+source,location_id,location_name,classification,2021,2022,2023,2024,2025,2026
+OpenAQ,3015285,Ortigas,OpenAQ Node,0,0,0,2879,6640,4643
+OpenAQ,3027756,NASA GSFC Rutgers Calib. N12,OpenAQ Node,0,0,0,2680,6363,4492
+OpenAQ,3370151,Mandaluyong City,OpenAQ Node,0,0,0,0,6946,5206
+OpenAQ,3990425,Along Shaw Blvd.,OpenAQ Node,0,0,0,0,5257,5165
+OpenAQ,3990426,Near Sucat Interchange/Exit,OpenAQ Node,0,0,0,0,5275,5216
+OpenAQ,4526987,"Monumento, Caloocan",OpenAQ Node,0,0,0,0,4391,5207
+OpenAQ,4526988,"Near Katipunan Ave., Quezon City",OpenAQ Node,0,0,0,0,4362,5181
+OpenAQ,4526989,Bradco Ave. cor Macapagal,OpenAQ Node,0,0,0,0,4239,5195
+OpenAQ,4795495,Barangay San Rafael Hall,OpenAQ Node,0,0,0,0,3558,4467
+OpenAQ,4795496,Gen. Luna St. corner Gov. Pascual Ave.,OpenAQ Node,0,0,0,0,3544,3778
+OpenAQ,4795497,3S Center Ugong,OpenAQ Node,0,0,0,0,3554,4480
+OpenAQ,4795498,Valenzuela CENRO (ARCA North),OpenAQ Node,0,0,0,0,3536,2753
+OpenAQ,4795499,Malabon Action Center,OpenAQ Node,0,0,0,0,3541,4466
+OpenAQ,4795500,Barangay Tanza 2 Hall,OpenAQ Node,0,0,0,0,3502,4444
+OpenAQ,4797637,J.P. Rizal Avenue corner Camia,OpenAQ Node,0,0,0,0,3560,4442
+OpenAQ,4797638,Mandaluyong Elementary School,OpenAQ Node,0,0,0,0,3546,4522
+OpenAQ,4797640,Kalayaan Avenue  - South Avenue Intersection,OpenAQ Node,0,0,0,0,3539,4431
+OpenAQ,4797641,Unnamed (DNVBA1576 → AL739RG7),OpenAQ Node,0,0,0,0,3538,4459
+OpenAQ,4797642,Santa Clara - Pasay City General Hospital,OpenAQ Node,0,0,0,0,3524,4481
+OpenAQ,4797643,Sto. Rosario Bridge,OpenAQ Node,0,0,0,0,3548,4475
+OpenAQ,4797644,World Trade Center,OpenAQ Node,0,0,0,0,3563,4460
+OpenAQ,4797645,J.P. Rizal Avenue corner Pertierra,OpenAQ Node,0,0,0,0,3549,4464
+OpenAQ,4797646,San Juan Mini Park,OpenAQ Node,0,0,0,0,3543,4434
+OpenAQ,4797647,Marikina Sports Complex,OpenAQ Node,0,0,0,0,3545,4463
+OpenAQ,4797648,Barangay Tambo - Quirino Avenue,OpenAQ Node,0,0,0,0,3517,4439
+OpenAQ,4797649,Aurora Boulevard (Tramo) - Andrews Avenue,OpenAQ Node,0,0,0,0,3571,4474
+OpenAQ,4797650,Pateros Bridge,OpenAQ Node,0,0,0,0,3500,4461
+OpenAQ,4797651,Ortigas Avenue-Roosevelt Intersection,OpenAQ Node,0,0,0,0,3542,4418
+OpenAQ,4797652,3S Center Bagbaguin,OpenAQ Node,0,0,0,0,3525,4491
+OpenAQ,4797653,Barangay Buli - Concepcion Street,OpenAQ Node,0,0,0,0,3551,4481
+OpenAQ,4797654,Barangay San Antonio - Parañaque-Sucat Road (Shopwise),OpenAQ Node,0,0,0,0,3539,4479
+OpenAQ,4797656,Barangay Tunasan - Maharlika Highway (SM Center Muntinlupa),OpenAQ Node,0,0,0,0,3535,4427
+OpenAQ,4797658,Barangay Fortune - Santan Street,OpenAQ Node,0,0,0,0,3545,4477
+OpenAQ,4797659,C3 Road (5th Avenue) - Rizal Avenue Extension,OpenAQ Node,0,0,0,0,3525,4432
+OpenAQ,4797660,3S Center Paso De Blas,OpenAQ Node,0,0,0,0,3559,4482
+OpenAQ,4797661,Old Wack Wack Road corner Shaw Boulevard,OpenAQ Node,0,0,0,0,3515,4477
+OpenAQ,4963739,ASMPH,OpenAQ Node,0,0,0,0,3743,5267
+OpenAQ,5975180,Valenzuela,OpenAQ Node,0,0,0,0,434,6487
+OpenAQ,5976206,Las Pinas,OpenAQ Node,0,0,0,0,376,6869
+OpenAQ,6303934,Sta. Ana Hospital,OpenAQ Node,0,0,0,0,0,3111
+OpenAQ,6303935,Near Puregold Tayuman,OpenAQ Node,0,0,0,0,0,3114
+OpenAQ,6303936,Anda Circle,OpenAQ Node,0,0,0,0,0,2050
+OpenAQ,6303937,San Sebastian Residences,OpenAQ Node,0,0,0,0,0,3131
+OpenAQ,6338564,Rajah Sulayman Park,OpenAQ Node,0,0,0,0,0,2754
+OpenAQ,6340868,Tivoli,OpenAQ Node,0,0,0,0,0,3741
+QC Data Converted,9000001,Novaliches Wet & Dry Market,Roadside,4032,8395,8758,8634,8760,0
+QC Data Converted,9000002,Quirino Highway cor. Mindanao Ave.,Roadside,4031,8754,8758,8424,8759,0
+QC Data Converted,9000003,Quezon City General Hospital,Non-roadside,4198,8744,8756,8782,8760,0
+QC Data Converted,9000004,Sto. Domingo Church,Roadside,4224,8734,8759,8784,8759,0
+QC Data Converted,9000005,Cubao Arayat Market,Roadside,4030,8753,8757,8784,8760,0
+QC Data Converted,9000006,Obrero corner Calle Industria,Roadside,4032,8754,8758,8525,8759,0
+QC Data Converted,9000007,Quezon City Public Library,Non-roadside,2016,8760,8173,8359,8615,0
+QC Data Converted,9000008,Commonwealth Barangay Hall,Non-roadside,2586,8752,8421,8784,8747,0
+QC Data Converted,9000009,La Loma Police Station 1,Roadside,0,3785,8718,8784,8760,0
+QC Data Converted,9000010,E. Rodriguez Sr. Ave.,Roadside,0,3792,8751,8597,8760,0
+QC Data Converted,9000011,Silangan Barangay Hall,Roadside,0,3720,8756,8784,8760,0
+QC Data Converted,9000012,Pansol Barangay Hall,Non-roadside,0,3720,8710,8780,8756,0
+QC Data Converted,9000013,Kalusugan Barangay Hall,Non-roadside,0,3792,8548,8784,8758,0
+QC Data Converted,9000014,Valencia Barangay Hall (prev. N. Domingo),Roadside,0,3792,8723,8784,8759,0
+QC Data Converted,9000015,Susano Road,Roadside,0,3720,8758,8735,8760,0
+QC Data Converted,9000016,Balintawak Cloverleaf,Roadside,0,3720,8750,8783,8304,0
+QC Data Converted,9000017,Quirino Highway cor. St. Dominic,Roadside,0,3720,8718,8783,8759,0
+QC Data Converted,9000018,Batasan Hills Barangay Hall,Roadside,0,3072,8740,8784,8707,0
+QC Data Converted,9000019,Kaligayahan Elementary School,Non-roadside,0,3072,8727,8782,8760,0
+QC Data Converted,9000020,KorPhil – Quezon City University,Non-roadside,0,936,8752,8782,8737,0
+QC Data Converted,9000021,Payatas Super Health Center,Non-roadside,0,0,0,8758,8753,0
+QC Data Converted,9000022,SB Diversion Road (prev. P. Dela Cruz),Roadside,0,0,0,8783,8760,0
+QC Data Converted,9000023,FEU Diliman,Roadside,0,0,0,8746,8752,0
+QC Data Converted,9000024,Pasong Tamo Elementary School,Roadside,0,0,0,8757,8760,0
+QC Data Converted,9000025,Maligaya Elementary School,Roadside,0,0,0,8775,8756,0
+QC Data Converted,9000026,Barangay Sauyo,Non-roadside,0,0,0,8748,8285,0
+QC Data Converted,9000027,San Isidro Church,Roadside,0,0,0,8762,8294,0
+QC Data Converted,9000028,Largo High School,Roadside,0,0,0,8739,8385,0
+QC Data Converted,9000029,Old Balara Elementary School,Roadside,0,0,0,8781,8759,0
+QC Data Converted,9000030,New Era University,Roadside,0,0,0,8736,8759,0
+QC Data Converted,9000031,Sgt. Esguerra Footbridge,Roadside,0,0,0,8687,8759,0
+QC Data Converted,9000032,Jose Rizal High School,Roadside,0,0,0,8741,8758,0
+QC Data Converted,9000033,Holy Spirit Elementary School,Roadside,0,0,0,8780,8760,0
+QC Data Converted,9000034,Pearl Drive Footbridge,Roadside,0,0,0,8781,8760,0
+QC Data Converted,9000035,Tandang Sora Barangay Hall Footbridge,Roadside,0,0,0,8779,8760,0
+QC Data Converted,9000036,St. Peter Parish Shrine of Leader Footbridge,Roadside,0,0,0,8776,8759,0
+QC Data Converted,9000037,Libis Barangay Hall Footbridge,Roadside,0,0,0,8776,8760,0
+QC Data Converted,9000038,Payatas Controlled Disposal Facility,Non-roadside,0,0,0,8766,8753,0
+QC Data Converted,9000039,Tomas Morato Ave.,Roadside,0,0,0,8762,8760,0
+QC Data Converted,9000040,Timog Ave. cor. EDSA Footbridge,Roadside,0,0,0,8765,8760,0

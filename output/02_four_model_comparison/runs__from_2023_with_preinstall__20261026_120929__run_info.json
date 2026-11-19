@@ -1,0 +1,445 @@
+{
+  "run_id": "20261026_120929",
+  "created": "2026-10-26T12:09:30",
+  "git_commit": "229a9a8",
+  "torch_version": "2.11.0+cu128",
+  "overrides": [
+    "data.split.cv_assignment=by_station",
+    "data.paths.sensor_locations_csv=../data/Combined Dataset/from_2023_with_preinstall/locations.csv",
+    "data.paths.sensor_csv_dir=../data/Combined Dataset/from_2023_with_preinstall/sensors",
+    "data.paths.processed_dir=runs/from_2023_with_preinstall/processed",
+    "data.paths.checkpoints_dir=runs/from_2023_with_preinstall/checkpoints",
+    "data.paths.snapshots_dir=runs/from_2023_with_preinstall/snapshots",
+    "data.paths.tuning_dir=runs/from_2023_with_preinstall/tuning",
+    "train.seed=42",
+    "train.batch_size=512"
+  ],
+  "tuned_from": null,
+  "tuned_hyperparameters": null,
+  "hyperparameters": {
+    "model": {
+      "spatial_cnn": {
+        "enabled": true,
+        "in_channels": 5,
+        "patch_px": 32,
+        "conv_channels": [
+          32,
+          64,
+          128
+        ],
+        "kernel_size": 3,
+        "feature_map": "pool",
+        "embed_dim": 64,
+        "dropout": 0.1
+      },
+      "temporal_lstm": {
+        "input_size": 4,
+        "hidden_size": 64,
+        "num_layers": 2,
+        "dropout": 0.1
+      },
+      "fusion_head": {
+        "hidden_dims": [
+          64,
+          32
+        ],
+        "dropout": 0.1,
+        "out_dim": 1
+      }
+    },
+    "train": {
+      "seed": 42,
+      "device": "auto",
+      "epochs": 50,
+      "batch_size": 512,
+      "num_workers": 0,
+      "optimizer": {
+        "name": "adam",
+        "lr": 0.001,
+        "weight_decay": 1e-05
+      },
+      "loss": "mse",
+      "early_stopping": true,
+      "early_stopping_patience": 8,
+      "grad_clip": 1.0,
+      "cv": {
+        "enabled": true
+      },
+      "final_epochs": null,
+      "runtime": {
+        "progress_every_s": 30,
+        "status_every_s": 300,
+        "stall_timeout_s": 600,
+        "hard_exit_grace_s": 60,
+        "max_hours": null,
+        "warn_hours": 2
+      }
+    },
+    "temporal": {
+      "lags": [
+        3,
+        2,
+        1
+      ],
+      "rolling_window": null,
+      "cyclical_hour": true
+    },
+    "spatial_lag": {
+      "enabled": true,
+      "k": 5,
+      "weighting": "inverse_distance"
+    },
+    "patch": {
+      "extent_m": 320,
+      "zero_pad_edges": true
+    },
+    "split": {
+      "group_col": "location_id",
+      "test_fraction": 0.2,
+      "calibration_fraction": 0.2,
+      "cv_folds": 3,
+      "cv_assignment": "by_station",
+      "seed": 42,
+      "test_stations": [],
+      "calibration_stations": []
+    },
+    "geocp": {
+      "alpha": 0.1,
+      "score": "absolute_error",
+      "min_lower_bound": 0.0,
+      "kernels": [
+        "gaussian",
+        "exponential"
+      ],
+      "bandwidths_m": [
+        2000,
+        5000,
+        10000,
+        20000,
+        "inf"
+      ],
+      "coverage_tolerance": 0.02,
+      "finite_sample_correction": false,
+      "zone_threshold_m": null,
+      "width_ratio_floor": 1.0
+    }
+  },
+  "derived": {
+    "T": 3,
+    "F": 4,
+    "C": 5,
+    "raster_resolution_m": 10.0,
+    "patch_px": 32,
+    "feature_names": [
+      "pm25",
+      "spatial_lag",
+      "sin_hour",
+      "cos_hour"
+    ],
+    "pm25_feature_idx": [
+      0,
+      1
+    ],
+    "rolling_std_idx": []
+  },
+  "parameters": {
+    "spatial_cnn": 102080,
+    "temporal_lstm": 51200,
+    "fusion_head": 10369,
+    "total": 163649
+  },
+  "architecture": "DualBranchNet(\n  (spatial): SpatialCNN(\n    (conv): Sequential(\n      (0): Conv2d(5, 32, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))\n      (1): ReLU()\n      (2): Conv2d(32, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))\n      (3): ReLU()\n      (4): Conv2d(64, 128, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))\n      (5): ReLU()\n    )\n    (reduce): AdaptiveAvgPool2d(output_size=1)\n    (project): Sequential(\n      (0): Linear(in_features=128, out_features=64, bias=True)\n      (1): ReLU()\n      (2): Dropout(p=0.1, inplace=False)\n    )\n  )\n  (temporal): TemporalLSTM(\n    (lstm): LSTM(4, 64, num_layers=2, batch_first=True, dropout=0.1)\n  )\n  (head): FusionHead(\n    (mlp): Sequential(\n      (0): Linear(in_features=128, out_features=64, bias=True)\n      (1): ReLU()\n      (2): Dropout(p=0.1, inplace=False)\n      (3): Linear(in_features=64, out_features=32, bias=True)\n      (4): ReLU()\n      (5): Dropout(p=0.1, inplace=False)\n      (6): Linear(in_features=32, out_features=1, bias=True)\n    )\n  )\n)",
+  "data": {
+    "created": "2026-10-26T12:09:25",
+    "shapes": {
+      "patches": [
+        84,
+        5,
+        32,
+        32
+      ],
+      "train": {
+        "X_temporal": [
+          796495,
+          3,
+          4
+        ],
+        "y": [
+          796495,
+          1
+        ]
+      },
+      "calibration": {
+        "X_temporal": [
+          227857,
+          3,
+          4
+        ],
+        "y": [
+          227857,
+          1
+        ]
+      },
+      "test": {
+        "X_temporal": [
+          286794,
+          3,
+          4
+        ],
+        "y": [
+          286794,
+          1
+        ]
+      }
+    },
+    "rows_per_partition": {
+      "train": 796495,
+      "calibration": 227857,
+      "test": 286794
+    },
+    "stations_per_partition": {
+      "train": 54,
+      "calibration": 13,
+      "test": 17
+    },
+    "partition": {
+      "train": [
+        3015285,
+        3027756,
+        3370151,
+        4526987,
+        4795495,
+        4795496,
+        4795497,
+        4795498,
+        4795500,
+        4797637,
+        4797640,
+        4797641,
+        4797642,
+        4797644,
+        4797645,
+        4797646,
+        4797647,
+        4797648,
+        4797649,
+        4797651,
+        4797652,
+        4797653,
+        4797654,
+        4797659,
+        4797660,
+        4963739,
+        5975180,
+        5976206,
+        6303934,
+        6303935,
+        6303936,
+        6338564,
+        9000003,
+        9000004,
+        9000005,
+        9000006,
+        9000007,
+        9000011,
+        9000012,
+        9000017,
+        9000020,
+        9000021,
+        9000023,
+        9000024,
+        9000025,
+        9000026,
+        9000029,
+        9000031,
+        9000032,
+        9000033,
+        9000035,
+        9000036,
+        9000037,
+        9000040
+      ],
+      "calibration": [
+        3990425,
+        3990426,
+        4795499,
+        4797643,
+        4797650,
+        4797661,
+        9000001,
+        9000008,
+        9000013,
+        9000014,
+        9000016,
+        9000027,
+        9000039
+      ],
+      "test": [
+        4526988,
+        4526989,
+        4797638,
+        4797658,
+        6303937,
+        6340868,
+        9000002,
+        9000009,
+        9000010,
+        9000015,
+        9000018,
+        9000019,
+        9000022,
+        9000028,
+        9000030,
+        9000034,
+        9000038
+      ]
+    },
+    "feature_names": [
+      "pm25",
+      "spatial_lag",
+      "sin_hour",
+      "cos_hour"
+    ],
+    "crs": "EPSG:32651",
+    "T": 3,
+    "F": 4,
+    "C": 5,
+    "patch_px": 32,
+    "temporal": {
+      "lags": [
+        3,
+        2,
+        1
+      ],
+      "rolling_window": null,
+      "cyclical_hour": true
+    },
+    "spatial_lag": {
+      "enabled": true,
+      "k": 5,
+      "weighting": "inverse_distance"
+    },
+    "time": {
+      "freq": "1h",
+      "max_gap_hours": 24
+    }
+  },
+  "cv": [
+    {
+      "fold": 0,
+      "val_stations": [
+        3027756,
+        3370151,
+        4795495,
+        4795496,
+        4797641,
+        4797652,
+        4797659,
+        5975180,
+        5976206,
+        6303936,
+        9000003,
+        9000006,
+        9000017,
+        9000020,
+        9000024,
+        9000025,
+        9000031,
+        9000035
+      ],
+      "fit_rows": 518276,
+      "val_rows": 261905,
+      "best_epoch": 3,
+      "epochs_run": 11,
+      "best_val_loss": 0.3332326436985654,
+      "metrics": {
+        "rmse": 6.829132567718751,
+        "mae": 3.853076761220408,
+        "ia": 0.8875621915209431,
+        "pearson_r": 0.8189324442796462,
+        "r2": 0.6689298636625766
+      }
+    },
+    {
+      "fold": 1,
+      "val_stations": [
+        3015285,
+        4795497,
+        4795498,
+        4797640,
+        4797644,
+        4797645,
+        4797646,
+        4797647,
+        4797649,
+        4797653,
+        4797654,
+        4963739,
+        9000007,
+        9000021,
+        9000032,
+        9000033,
+        9000036,
+        9000040
+      ],
+      "fit_rows": 533347,
+      "val_rows": 256269,
+      "best_epoch": 2,
+      "epochs_run": 10,
+      "best_val_loss": 0.19337017908558912,
+      "metrics": {
+        "rmse": 5.202193765536015,
+        "mae": 3.212166784059145,
+        "ia": 0.9262710413837143,
+        "pearson_r": 0.8682705464392185,
+        "r2": 0.7530708790938987
+      }
+    },
+    {
+      "fold": 2,
+      "val_stations": [
+        4526987,
+        4795500,
+        4797637,
+        4797642,
+        4797648,
+        4797651,
+        4797660,
+        6303934,
+        6303935,
+        6338564,
+        9000004,
+        9000005,
+        9000011,
+        9000012,
+        9000023,
+        9000026,
+        9000029,
+        9000037
+      ],
+      "fit_rows": 527611,
+      "val_rows": 268508,
+      "best_epoch": 7,
+      "epochs_run": 15,
+      "best_val_loss": 0.378717196178475,
+      "metrics": {
+        "rmse": 7.280300183629153,
+        "mae": 4.021702212199232,
+        "ia": 0.8925510785467844,
+        "pearson_r": 0.8228903019562018,
+        "r2": 0.6766840849144994
+      }
+    }
+  ],
+  "final_fit": {
+    "epochs": 4,
+    "epochs_source": "mean best epoch of CV folds",
+    "last_train_loss": 0.29565841671958015,
+    "checkpoint": "best_dual_branch_model.pt"
+  },
+  "test_metrics": null,
+  "calibration_metrics": null,
+  "geocp": null,
+  "spatial_bias": null,
+  "status": "completed"
+}

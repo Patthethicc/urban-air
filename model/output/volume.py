@@ -6,8 +6,19 @@ from output.aqi_maps import categorize
 
 
 def expand_dates(dates: list[str], hours: list[int]) -> list[pd.Timestamp]:
-    """--date 2025-07-01 -> the configured snapshot hours of that day (08:00, 12:00, 17:00, 21:00)."""
+    """--date 2025-07-01 -> the configured snapshot hours of that day (inference.snapshot_hours: all 24 by default)."""
     return [pd.Timestamp(d).normalize() + pd.Timedelta(hours=int(h)) for d in dates for h in hours]
+
+
+def explain_hours_of(cfg: dict) -> list[int]:
+    """The hours Grad-CAM runs on for --date: inference.explain_hours, or every snapshot hour when that is empty / missing."""
+    hours = cfg["inference"].get("explain_hours")
+    return list(hours) if hours else list(cfg["inference"]["snapshot_hours"])
+
+
+def mean_title(n: int, date) -> str:
+    """Title of the daily-mean map: '24-hour mean' only when the 24 hourly snapshots really are behind it."""
+    return f"24-hour mean, {date:%Y-%m-%d}" if n == 24 else f"Mean of {n} snapshots, {date:%Y-%m-%d}"
 
 
 def group_by_date(timestamps: list[pd.Timestamp]) -> dict:

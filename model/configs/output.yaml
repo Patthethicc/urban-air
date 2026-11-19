@@ -67,6 +67,11 @@ maps:                     # what the PNG maps and the explain figures are drawn 
                           # Other settings: auto = the 2nd to 98th percentile of the day's predictions inside the NCR, shared by all panels;
                           # or [lo, hi] in ug/m3 to compare days on one fixed scale
 dpi: 150
+animation:                # --stage infer with several hours of a date (inference.snapshot_hours, all 24 by default): the hourly maps played as a day
+  enabled: true           # <style>_animation.gif (always), <style>_animation.mp4 (needs `pip install imageio imageio-ffmpeg`, else skipped with a
+  fps: 2                  # notice) and <style>_slideshow.html (play / pause + slider) next to the hourly maps. Frames per second; 2 = a day in 12 s.
+  formats: [gif, mp4, html]
+  hold_last_s: 1.5        # the last frame stays this long before the loop restarts (GIF)
 explain:                  # Grad-CAM on the CNN branch (--stage explain)
   top_n: 6                # highest-predicted cells of the chosen snapshot
   bottom_n: 6             # lowest-predicted cells

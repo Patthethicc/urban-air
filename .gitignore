@@ -1,0 +1,21 @@
+# Ignore "eda_outputs" anywhere in the repository
+#eda_results/
+#eda_outputs/
+# Ignore "data" ONLY in the root directory (leading slash)
+data/
+other-country-scapers/
+
+# secrets: the OpenAQ API key lives in .env files and must never be committed
+.env
+**/.env
+
+# big or generated files (a push is refused above 100 MB; GitHub warns above 50 MB)
+*.zip
+__pycache__/
+*.pyc
+model/runs/*/processed*/
+model/runs/*/tl/
+model/runs/*/tl_cv/
+model/runs/*/lc/
+other-country-scrapers/_raw/
+*oof_predictions.csv

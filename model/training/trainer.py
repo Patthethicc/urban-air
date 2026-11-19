@@ -30,7 +30,8 @@ class Trainer:
         self.model.dedupe_patches = True               # station samples share patches: see SpatialCNN.forward
         o = train_cfg["optimizer"]
         opt = {"adam": torch.optim.Adam, "adamw": torch.optim.AdamW}[o["name"]]
-        self.optimizer = opt(self.model.parameters(), lr=o["lr"], weight_decay=o["weight_decay"])
+        trainable = [p for p in self.model.parameters() if p.requires_grad]     # train.freeze (transfer learning) keeps parts out of the optimiser
+        self.optimizer = opt(trainable, lr=o["lr"], weight_decay=o["weight_decay"])
         self.criterion = build_loss(train_cfg["loss"])
 
     def train_epoch(self, loader, label: str = "training", verbose: bool = True) -> float:

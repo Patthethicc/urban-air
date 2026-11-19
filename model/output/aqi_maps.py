@@ -502,16 +502,26 @@ def render_snapshot(values, transform, crs, path: str, title: str, cfg: dict, th
     return path
 
 
+def panel_grid(n: int) -> tuple[int, int, float, float]:
+    """(rows, columns, panel width, panel height in inches) for n snapshots. Up to 6 panels the old two-column layout (unchanged); a
+    whole day (24 hours) becomes 4 rows x 6 columns of smaller panels, so the figure stays about the size of a page."""
+    if n <= 1:
+        return 1, 1, 5.0, 6.0
+    if n <= 6:
+        return int(np.ceil(n / 2)), 2, 5.0, 6.0
+    ncols = 3 if n <= 9 else 4 if n <= 12 else 6
+    return int(np.ceil(n / ncols)), ncols, 3.4, 4.2
+
+
 def render_panels(stack, labels: list[str], transform, crs, path: str, title: str, cfg: dict, threshold,
                   stations=None, *, style: str = "aqi", vrange=None, caption: str | None = None) -> str:
     """All snapshots of a day side by side (one shared scale: the AQI bands, or one continuous colourbar)."""
     o = cfg["output"]
     n = len(stack)
-    ncols = 2 if n > 1 else 1
-    nrows = int(np.ceil(n / ncols))
+    nrows, ncols, pw, ph = panel_grid(n)
     if style == "continuous" and xgboost_look(cfg, style) and n > 1:
         return _render_panels_compact(stack, labels, transform, crs, path, cfg, threshold, stations, vrange, nrows, ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5.0 * ncols + (1.0 if style == "continuous" else 0), 6.0 * nrows + 0.9),
+    fig, axes = plt.subplots(nrows, ncols, figsize=(pw * ncols + (1.0 if style == "continuous" else 0), ph * nrows + 0.9),
                              facecolor=SURFACE, squeeze=False)
     if style == "continuous" and vrange is None:
         vrange = continuous_range(stack, transform, cfg)
@@ -543,8 +553,13 @@ def _render_panels_compact(stack, labels, transform, crs, path, cfg, threshold, 
     tight gaps, no footer, and one tall colourbar on the right."""
     n = len(stack)
     vrange = vrange if vrange is not None else continuous_range(stack, transform, cfg)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(6.4, 4.4 * nrows), facecolor=SURFACE, squeeze=False)
-    fig.subplots_adjust(left=0.15, right=0.87, top=0.965, bottom=0.075, wspace=0.1, hspace=0.1)
+    # two columns (up to 6 snapshots) keep the exact old size and margins; a day of 24 hours uses more, smaller panels (margins in inches)
+    small = ncols > 2
+    width, height = (2.4 * ncols + 1.5, 3.3 * nrows + 0.5) if small else (6.4, 4.4 * nrows)
+    left_in, right_in = (0.62, 0.95) if small else (0.96, 0.83)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(width, height), facecolor=SURFACE, squeeze=False)
+    fig.subplots_adjust(left=left_in / width, right=1 - right_in / width, top=0.965 if not small else 1 - 0.28 / height,
+                        bottom=0.075 if not small else 0.45 / height, wspace=0.1, hspace=0.1 if not small else 0.16)
     image = None
     for i, ax in enumerate(axes.ravel()):
         if i >= n:
@@ -552,7 +567,7 @@ def _render_panels_compact(stack, labels, transform, crs, path, cfg, threshold, 
             continue
         ax.set_facecolor(SURFACE)
         image = draw_surface(ax, stack[i], transform, crs, cfg, threshold, _stations(cfg, stations), None, style="continuous", vrange=vrange)
-        ax.set_title(labels[i], color=INK, fontsize=11, pad=4)
+        ax.set_title(labels[i], color=INK, fontsize=11 if not small else 9, pad=4)
         for side in ax.spines.values():                          # full thin frame round every panel
             side.set_visible(True)
             side.set_linewidth(1.5)
@@ -571,7 +586,8 @@ def _render_panels_compact(stack, labels, transform, crs, path, cfg, threshold, 
             ax.set_xlabel("")
             ax.tick_params(labelbottom=False)
     top, bottom = axes[0, 0].get_position().y1, axes[-1, 0].get_position().y0
-    cax = fig.add_axes([0.9, bottom + 0.14 * (top - bottom), 0.026, 0.70 * (top - bottom)])
+    cax = fig.add_axes([0.9 if not small else 1 - 0.7 / width, bottom + 0.14 * (top - bottom), 0.026 if not small else 0.14 / width,
+                        0.70 * (top - bottom)])
     cbar = fig.colorbar(image, cax=cax)
     cbar.set_label(UNIT, color=INK2, fontsize=7)
     style_colourbar(cbar, image, cfg)
@@ -609,6 +625,12 @@ def render_day(stack, labels: list[str], transform, crs, maps_dir, date, cfg: di
             render_panels(stack, labels, transform, crs, str(maps_dir / f"{panels_stem}.png"), f"PM2.5 prediction, {date:%Y-%m-%d}", cfg,
                           o["highlight_threshold"], stations, style=style, vrange=vr, caption=caption)
             if mean is not None:
+                from output.volume import mean_title
+
                 render_snapshot(mean, transform, crs, str(maps_dir / f"{mean_stem}.png"),
-                                f"24-hour mean of {len(labels)} snapshots, {date:%Y-%m-%d}", cfg, o["daily_guideline"], stations,
+                                mean_title(len(labels), date), cfg, o["daily_guideline"], stations,
                                 style=style, caption=caption)
+            from output.animation import render_animation          # the hourly frames above, played one after the other
+
+            render_animation(maps_dir, hourly_stem, panels_stem.replace("_panels", "").replace("daily", style),
+                             labels, f"PM2.5 prediction, {date:%Y-%m-%d} ({style} scale)", cfg)

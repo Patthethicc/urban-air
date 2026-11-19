@@ -1,0 +1,10 @@
+# 09_hyperparameter_tuning
+
+Hyperparameter search (Optuna): convergence and the chosen values
+
+4 files (copied by collect_results.py):
+
+- runs__from_2023_with_preinstall_v3__20261026_195401__best_hyperparameters.json
+- runs__from_2023_with_preinstall_v3__20261026_195401__convergence_final.png
+- runs__from_2023_with_preinstall_v3__20261026_195401__search_final.json
+- runs__from_2023_with_preinstall_v3__20261026_195401__tune_info.json

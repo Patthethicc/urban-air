@@ -211,7 +211,7 @@ def preprocess(cfg: dict) -> None:
     print("stations per partition:", {k: len(v) for k, v in partition.items()})
 
     _save_hourly(df, cfg, out_dir)
-    if d["spatial_lag"]["enabled"]:
+    if d["spatial_lag"]["enabled"] and "spatial_lag" in dv["feature_names"]:      # not computed in the no-lag diagnostic (use_pm25_lags: false)
         df = add_spatial_lag(df, partition, cfg)
     X, y, meta = build_windows(df, cfg)
     print(f"windows: X_temporal {X.shape}, y {y.shape}")
@@ -255,6 +255,17 @@ def preprocess(cfg: dict) -> None:
     }
     (out_dir / "preprocess_info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
     print(f"saved to {out_dir}")
+
+
+def dataset(cfg: dict) -> str:
+    """The dataset report: sensors, rows kept and dropped, missingness, temporal availability, the PM2.5 distribution and the distributions of the
+    morphology bands (reporting/dataset_report.py). Written to dataset_report/ next to the processed folder; nothing is trained."""
+    from reporting import dataset_report
+
+    out = Path(_paths(cfg)["processed_dir"]).parent / "dataset_report"
+    result = dataset_report.run(cfg, out)
+    print(f"dataset report: {result['sensors']} sensors, {result['span']}; written to {out}")
+    return str(out)
 
 
 def tune(cfg: dict) -> str:
@@ -309,6 +320,7 @@ def train(cfg: dict) -> str:
     from training.metrics import compute_all
     from training.run_info import new_run_info, save_run_info, update_runs_index, write_json
     from training.trainer import Trainer, make_loader
+    from training.transfer import build_model
 
     tc, mc = cfg["train"], cfg["model"]
     processed = _paths(cfg)["processed_dir"]
@@ -360,7 +372,7 @@ def train(cfg: dict) -> str:
             set_seed(tc["seed"] + k + 1)
             fold_ds, fit_idx, val_idx = recomputer.apply(train_ds, fit_idx, val_idx)   # lag from fit stations only
             fit_ds, val_ds = Subset(fold_ds, fit_idx), Subset(fold_ds, val_idx)
-            trainer = Trainer(DualBranchNet(mc), tc, mc, str(run_dir), extra)
+            trainer = Trainer(build_model(mc, tc), tc, mc, str(run_dir), extra)    # warm start / frozen parts: train.init_from, train.freeze
             hist = trainer.fit(make_loader(fit_ds, tc, True), make_loader(val_ds, tc, False),
                                ckpt_path=str(run_dir / f"fold_{k}.pt"), tag=f"[fold {k}]")
             _, y_true, y_pred = trainer.evaluate(make_loader(val_ds, tc, False))
@@ -386,11 +398,14 @@ def train(cfg: dict) -> str:
     final_epochs = max(1, int(final_epochs))
     print(f"final fit on all training stations for {final_epochs} epochs")
     set_seed(tc["seed"])
-    trainer = Trainer(DualBranchNet(mc), tc, mc, str(run_dir), extra)
+    trainer = Trainer(build_model(mc, tc), tc, mc, str(run_dir), extra)    # warm start / frozen parts: train.init_from, train.freeze
     hist = trainer.fit(make_loader(train_ds, tc, True), None, epochs=final_epochs,
                        ckpt_path=str(run_dir / MODEL_FILE), tag="[final]")
     history["final"] = hist
     info["status"] = "completed"
+    from training.transfer import last_report
+    if last_report:
+        info["transfer"] = dict(last_report)                  # what train.init_from / train.freeze did (layers loaded, parts frozen)
     info["final_fit"] = {"epochs": final_epochs, "epochs_source": ("tuned epochs (mean best epoch of the winning trial)" if cfg.get("tuned_from")
                                            else "final_epochs override") if tc["final_epochs"]
                          else ("mean best epoch of CV folds" if best_epochs else "train.epochs"),
@@ -530,7 +545,7 @@ def _inference_context(cfg: dict, run_id: str) -> dict:
 def infer(cfg: dict, run_id: str | None, timestamps: list[str], dates: list[str]) -> list[str]:
     """City-wide inference and map generation (Output.txt, Section 4.5).
 
-    For every date: one prediction surface per snapshot hour (inference.snapshot_hours: 08, 12, 17, 21),
+    For every date: one prediction surface per snapshot hour (inference.snapshot_hours: all 24 hours by default),
     stacked into a prediction volume (one band per snapshot) with the aligned GeoCP lower / upper / width
     volumes, a 24-hour mean surface, AQI-coloured maps (optional outline above 35 ug/m3, output.outline_above_threshold; the mean
     at the 50 ug/m3 guideline) and output_summary.json, in snapshots/<run_id>/surface/<YYYYMMDD>/.
@@ -797,7 +812,7 @@ def explain(cfg: dict, run_id: str | None, timestamp: str | None) -> str:
     return str(out_dir)
 
 
-NOTE_AGGREGATE = ("HOT and COLD cells here are the highest and lowest cells of the AVERAGE of the snapshot hours of the day (numbers match the map). "
+NOTE_AGGREGATE = ("HOT and COLD cells here are the highest and lowest cells of the AVERAGE of the explained hours of the day (numbers match the map). "
                   "The Grad-CAM shown is the average of the Grad-CAMs of the same cell at each of those hours, so it keeps what the CNN looks at "
                   "all day, not what it looks at in a single hour.")
 
@@ -856,10 +871,20 @@ def explain_aggregate(cfg: dict, run_id: str, group: list, folders: dict) -> str
     summary = {"date": f"{date:%Y-%m-%d}", **aggregate.run(cfg, folders=folders, out_dir=out_dir, names=names, caption=caption, dpi=dpi,
                                                           date=f"{date:%Y-%m-%d}")}
 
-    mean_path = Path(_paths(cfg)["snapshots_dir"]) / run_id / "surface" / day / "prediction_daily_mean.tif"
+    surface_dir = Path(_paths(cfg)["snapshots_dir"]) / run_id / "surface" / day
+    mean_path = surface_dir / "prediction_daily_mean.tif"
+    volume_path = surface_dir / "prediction_volume.tif"
     if mean_path.exists():
         with rasterio.open(mean_path) as src:
             mean_map, tr = src.read(1), src.transform
+        if volume_path.exists():
+            # the day's volume may hold all 24 hours while Grad-CAM ran on a few (inference.explain_hours): the hot and cold cells must come
+            # from the mean of exactly the EXPLAINED hours, so the cell's mean prediction and its averaged Grad-CAM describe the same hours
+            with rasterio.open(volume_path) as vol:
+                labels = list(vol.descriptions)
+                wanted = [t.strftime("%H:%M") for t in group]
+                if all(w in labels for w in wanted) and len(wanted) < len(labels):
+                    mean_map = np.mean([vol.read(labels.index(w) + 1) for w in wanted], axis=0)
         ctx = _inference_context(cfg, run_id)
         boundary = cartography.active_boundary(cfg)
         ok = np.isfinite(mean_map)
@@ -955,7 +980,7 @@ def clean(cfg: dict, execute: bool = False, keep=(), include_rasters: bool = Fal
 # ------------------------------------------------------------------ CLI
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--stage", required=True, choices=["rasters", "preprocess", "tune", "train", "geocp", "bias", "surface", "infer", "explain", "report", "all",
+    p.add_argument("--stage", required=True, choices=["rasters", "preprocess", "dataset", "pretrain", "tune", "train", "geocp", "bias", "surface", "infer", "explain", "report", "all",
                                                        "clean", "reset", "coverage"])
     p.add_argument("--yes", action="store_true", help="clean: really delete (without it clean is a dry run)")
     p.add_argument("--keep", action="append", default=[], choices=["processed", "checkpoints", "snapshots", "tuning"],
@@ -965,6 +990,8 @@ def main() -> None:
     p.add_argument("--tuned", nargs="?", const="latest", default=None,
                    help="train with tune output: latest (default) or a tuning folder")
     p.add_argument("--run-id", default=None)
+    p.add_argument("--source", action="append", default=[], help="pretrain: a source city folder under transfer.source_root, e.g. vietnam/hanoi (repeatable; none = all)")
+    p.add_argument("--name", default="default", help="pretrain: the name of the pretrained model (folder under data.paths.pretrained_dir)")
     p.add_argument("--baseline", default=None, help="report: run id of a temporal-only run to compare R2 with")
     p.add_argument("--prediction-raster", default=None, help="surface: point-prediction GeoTIFF")
     p.add_argument("--timestamp", action="append", default=[], help="infer / explain: local hour, e.g. '2025-07-01 12:00' (repeatable)")
@@ -1014,6 +1041,11 @@ def run(cfg: dict, args) -> None:
         build_rasters(cfg)
     if stage in ("preprocess", "all"):
         preprocess(cfg)
+    if stage == "dataset":
+        dataset(cfg)
+    if stage == "pretrain":
+        from transfer.pretrain import pretrain
+        pretrain(cfg, args.name, args.source or None)
     if stage == "tune":
         tune(cfg)
     run_id = args.run_id
@@ -1032,8 +1064,8 @@ def run(cfg: dict, args) -> None:
     if stage == "explain":
         stamps = [pd.Timestamp(t) for t in args.timestamp]
         if args.date:                                          # a day = every snapshot hour (inference.snapshot_hours) + the aggregate
-            from output.volume import expand_dates
-            stamps += expand_dates(args.date, cfg["inference"]["snapshot_hours"])
+            from output.volume import expand_dates, explain_hours_of
+            stamps += expand_dates(args.date, explain_hours_of(cfg))     # inference.explain_hours (default the four old hours: Grad-CAM is slow)
         if not stamps:
             raise SystemExit("--stage explain needs --date 2025-07-01 (every snapshot hour and their aggregate) or --timestamp '2025-07-01 12:00' "
                              "(repeatable), made by --stage infer")

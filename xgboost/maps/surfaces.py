@@ -68,6 +68,15 @@ def geocp_intervals(model, cells, alpha=0.10, h=None, kernel='gaussian', mapping
     return out
 
 
+def without_intervals(cells):
+    """The same columns as `geocp_intervals`, left empty: for runs made with --no-geocp (predictions only)."""
+    out = cells.copy()
+    for col in ('q', 'lower', 'upper', 'lower_display', 'width', 'bandwidth_m', 'alpha'):
+        out[col] = np.nan
+    out['kernel'] = None
+    return out
+
+
 def aqi_category(values):
     """Index into AQI_BINS per value (NaN -> -1)."""
     v = np.asarray(values, dtype=float)
@@ -95,6 +104,12 @@ def write_snapshot(cells, ts, out_dir=None):
     png = _try_map(cells, ts, out_dir, stem)
     if png:
         written.append(png)
+    from maps import ncr_maps     # extra: the continuous map again with the NCR outline, cut cells and smooth (needs the boundary file)
+    for smooth in (False, True):
+        for extra in (ncr_maps.render_ncr_snapshot(cells, ts, out_dir, stem, smooth=smooth),
+                      ncr_maps.render_ncr_aqi(cells, ts, out_dir, stem, smooth=smooth)):
+            if extra:
+                written.append(extra)
     written.append(_write_summary(cells, ts, out_dir, stem))
     return written
 
@@ -263,12 +278,18 @@ def _try_map(cells, ts, out_dir, stem):
     return path
 
 
-def suggest_limits(frames, lo=2.0, hi=98.0, floor=(0.0, 25.0)):
-    """Shared colour limits for a set of snapshots, from the pooled predictions.
+SHARED_RANGE = (0.0, 25.0)    # the FIXED continuous scale, shared with the CNN-LSTM maps (model/configs/output.yaml maps.continuous_range)
+
+
+def suggest_limits(frames, lo=2.0, hi=98.0, floor=(0.0, 25.0), fixed=SHARED_RANGE):
+    """Shared colour limits for a set of snapshots: the fixed SHARED_RANGE (the same scale as the CNN-LSTM maps), or with fixed=None
+    the percentiles of the pooled predictions.
 
     One scale across the whole set is deliberate: four surfaces on four different scales cannot be
     compared. Percentiles rather than min/max so a single spike does not flatten everything else.
     """
+    if fixed is not None:
+        return fixed
     vals = np.concatenate([np.asarray(f['prediction'], dtype=float) for f in frames.values()])
     vals = vals[np.isfinite(vals)]
     if vals.size == 0:
@@ -299,8 +320,10 @@ def render_daily_mean(frames, out_dir, date, vmin=None, vmax=None, stem=None):
     mean = mean[np.isfinite(mean['prediction'])]
     if mean.empty:
         return None
+    # '24-hour mean' only when all 24 hourly snapshots are behind it; otherwise say how many
+    _label = '24-hour mean' if len(frames) == 24 else f'mean of {len(frames)} snapshots'
     return _try_continuous_map(mean, pd.Timestamp(date), out_dir, stem or f'{date}_mean', True,
-                               vmin=vmin, vmax=vmax, label='24-hour mean')
+                               vmin=vmin, vmax=vmax, label=_label)
 
 
 
@@ -368,17 +391,9 @@ def _try_continuous_map(cells, ts, out_dir, stem, based, vmin=None, vmax=None, l
     except ImportError:
         return None
     from maps import basemap
-    # Data-driven by default: a fixed 0-25 scale flattened every cell into one colour because this
-    # pipeline's predictions cluster near 10-15 ug/m3. Callers pass shared limits to keep snapshots
-    # comparable to each other.
-    if vmin is None or vmax is None:
-        vals = np.asarray(cells['prediction'], dtype=float)
-        vals = vals[np.isfinite(vals)]
-        if vals.size:
-            vmin = 0.0 if vmin is None else vmin
-            vmax = float(np.percentile(vals, 98)) if vmax is None else vmax
-        else:
-            vmin, vmax = (0.0, 25.0)
+    # Fixed by default (SHARED_RANGE, the same scale as the CNN-LSTM maps); callers may pass their own limits.
+    vmin = SHARED_RANGE[0] if vmin is None else vmin
+    vmax = SHARED_RANGE[1] if vmax is None else vmax
     fig, ax = plt.subplots(figsize=(8.5, 7))
     gdf = _cell_geometries(cells, cells['prediction'].values)
     if gdf.empty:
@@ -432,7 +447,7 @@ def load_or_infer_snapshots(run=None, timestamps=None, out_dir=None, quiet=False
         from run_pipeline import _fit_production_model
         from inference.cell_inference import infer_timestamp
         model, features, _ = _fit_production_model()
-        hours = [8, 12, 17, 21]
+        hours = data.SNAPSHOT_HOURS      # all 24 hours unless XGB_SNAPSHOT_HOURS names others
         stamps = [pd.Timestamp(t) for t in timestamps] if timestamps else \
             [pd.Timestamp(run).normalize() + pd.Timedelta(hours=h) for h in hours]
         for ts in stamps:
@@ -464,8 +479,14 @@ def render_panel(frames, path, *, vmin=None, vmax=None, ncols=2, title=None):
         raise ValueError('render_panel got no usable frames')
     if vmin is None or vmax is None:
         vmin, vmax = suggest_limits(frames)
+    if ncols == 2 and len(items) > 6:
+        # more than six snapshots (a whole day): more, smaller panels instead of a figure twelve rows tall (4 x 6 for 24 hours)
+        ncols = 3 if len(items) <= 9 else 4 if len(items) <= 12 else 6
+        panel_w, panel_h = 3.4, 3.2
+    else:
+        panel_w, panel_h = 6.2, 5.6                       # the old size, used for up to six panels
     nrows = -(-len(items) // ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(6.2 * ncols, 5.6 * nrows), squeeze=False)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(panel_w * ncols, panel_h * nrows), squeeze=False)
     norm = Normalize(vmin=vmin, vmax=vmax)
     for ax in axes.ravel()[len(items):]:
         ax.set_axis_off()
@@ -500,6 +521,12 @@ def render_panel(frames, path, *, vmin=None, vmax=None, ncols=2, title=None):
     return path
 
 
+def _num(x):
+    """A float for the JSON summary, None for NaN (intervals not computed)."""
+    x = float(x)
+    return x if np.isfinite(x) else None
+
+
 def _write_summary(cells, ts, out_dir, stem):
     finite = cells[np.isfinite(cells['prediction'])]
     cat = aqi_category(finite['prediction'].values)
@@ -516,11 +543,11 @@ def _write_summary(cells, ts, out_dir, stem):
             'max': float(finite['prediction'].max()) if len(finite) else None,
         },
         'interval': {
-            'mean_width': float(finite['width'].mean()) if len(finite) else None,
-            'median_width': float(finite['width'].median()) if len(finite) else None,
-            'bandwidth_m': float(finite['bandwidth_m'].iloc[0]) if len(finite) else None,
+            'mean_width': _num(finite['width'].mean()) if len(finite) else None,
+            'median_width': _num(finite['width'].median()) if len(finite) else None,
+            'bandwidth_m': _num(finite['bandwidth_m'].iloc[0]) if len(finite) else None,
             'kernel': finite['kernel'].iloc[0] if len(finite) else None,
-            'alpha': float(finite['alpha'].iloc[0]) if len(finite) else None,
+            'alpha': _num(finite['alpha'].iloc[0]) if len(finite) else None,
         },
         'cells_above_35': int((finite['prediction'] > HIGHLIGHT).sum()) if len(finite) else 0,
         'aqi_category_share': {

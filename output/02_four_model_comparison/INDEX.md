@@ -1,0 +1,20 @@
+# 02_four_model_comparison
+
+CNN-LSTM vs LSTM-only, with and without GeoCP: accuracy, predictions, calibration, training curves
+
+14 files (copied by collect_results.py):
+
+- runs__comparison__comparison.md
+- runs__comparison__comparison_arms.csv
+- runs__comparison__comparison_runs.csv
+- runs__from_2023__20261021_142101__run_info.json
+- runs__from_2023_with_preinstall__20261026_120929__history.json
+- runs__from_2023_with_preinstall__20261026_120929__oof_predictions.csv
+- runs__from_2023_with_preinstall__20261026_120929__run_info.json
+- runs__from_2023_with_preinstall__20261026_135358__history.json
+- runs__from_2023_with_preinstall__20261026_135358__oof_predictions.csv
+- runs__from_2023_with_preinstall__20261026_135358__run_info.json
+- runs__from_2023_with_preinstall__20261026_152813__history.json
+- runs__from_2023_with_preinstall__20261026_152813__oof_predictions.csv
+- runs__from_2023_with_preinstall__20261026_152813__run_info.json
+- runs__from_2023_with_preinstall__runs_index.csv

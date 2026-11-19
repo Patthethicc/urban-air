@@ -233,6 +233,8 @@ def run(model, feature_names, dates, out_dir=None, window_px=None, chunk_rows=CH
 
     written, frames = [], {}
     for d in dates:
+        # NOTE: the full 10 m grid stays at four hours on purpose. One 10 m snapshot is ~10.6 M cells, so 24 hours would take six times as
+        # long. The 500 m surfaces (run_pipeline.stage_infer) use data.SNAPSHOT_HOURS (all 24 by default) and are what the animation plays.
         for hour in (8, 12, 17, 21):
             ts = pd.Timestamp(d).normalize() + pd.Timedelta(hours=hour)
             hours = _hours_for(ts)

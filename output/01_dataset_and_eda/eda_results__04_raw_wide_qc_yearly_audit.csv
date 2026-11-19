@@ -1,0 +1,6 @@
+file_name,rows_hours,active_station_columns,dropped_trailing_unnamed_cols,merged_commonwealth_split,start_timestamp,end_timestamp,non_null_measurements,overall_cell_completeness_pct,mean_pm25,max_pm25
+AQ_Sensors_Hourly_2021.csv,4224,8,0,False,2021-07-09,2021-12-31 23:00:00,29149,86.26,20.28,171.66
+AQ_Sensors_Hourly_2022.csv,8760,20,0,True,2022-01-01,2022-12-31 23:00:00,110487,63.06,19.83,712.93
+AQ_Sensors_Hourly_2023.csv,8760,20,0,True,2023-01-01,2023-12-31 23:00:00,173791,99.2,20.4,283.65
+AQ_Sensors_Hourly_2024.csv,8784,40,0,False,2024-01-01,2024-12-31 23:00:00,349436,99.45,20.11,1707.85
+AQ_Sensors_Hourly_2025.csv,8761,40,1,False,2025-01-01,2025-12-31 23:00:00,348391,99.42,17.7,1287.98

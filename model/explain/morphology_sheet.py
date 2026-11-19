@@ -87,7 +87,8 @@ def plot_morphology_sheet(raster_path: str, cfg: dict, cells: list[dict], path: 
         cb.set_label(unit_of(band), fontsize=6.5, color=INK2)
     notes = [f"Each map is one band of the Master GeoTIFF (the CNN input), averaged to about {step_m:g} m cells and clipped to the NCR. "
              "Classes hold equal numbers of cells (quantiles); the legend gives their limits; grey = no data.",
-             "Red triangles = the explained HOT cells (highest predicted PM2.5), blue circles = the COLD cells (lowest); white dots = stations."]
+             ("Red triangles = the explained HOT cells (highest predicted PM2.5), blue circles = the COLD cells (lowest); white dots = stations."
+              if cells else "White dots = the sensors.")]
     notes += [f"{b.replace('_', ' ')} ({unit_of(b)}): {meaning_of(b)}." for b in band_names[:n]]
     ax = flat[n]
     ax.axis("off")

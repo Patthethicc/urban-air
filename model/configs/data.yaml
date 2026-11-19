@@ -14,6 +14,7 @@ paths:
   checkpoints_dir: checkpoints
   snapshots_dir: snapshots
   tuning_dir: tuning
+  pretrained_dir: pretrained    # `--stage pretrain` writes <pretrained_dir>/<name>/pretrained_lstm.pt (transfer learning, configs/transfer.yaml)
   # inputs of the one-off `rasters` stage (not needed: master_raster_v2.tif is already built)
   buildings_csv: null           # Google Open Buildings, WKT geometry column
   streets: null                 # OSM road centerlines (gpkg / shp / geojson)
@@ -59,6 +60,11 @@ temporal:
   lags: [3, 2, 1]               # oldest first -> T = len(lags)
   rolling_window: null          # e.g. 3 -> adds rolling mean + std (ending at each step) per step
   cyclical_hour: true           # sin_hour / cos_hour per step
+  use_pm25_lags: true           # true (default) = the PM2.5 lags and the spatial lag are inputs. false = the DIAGNOSTIC without any PM2.5 history: the temporal
+                                # branch sees only the hour of day, so the CNN branch (the morphology) is the only way to tell stations apart. Compare the CNN-LSTM
+                                # with the LSTM-only model under this setting to see whether the morphology carries signal on its own, or is redundant with the
+                                # lags (the learning curve and the four models show it adds nothing ON TOP of them). Needs cyclical_hour: true. Not for maps:
+                                # the models are far less accurate, and the persistence yardstick in the report still reads the readings.
   # Features per timestep, in this order (F is derived, see config_parser.derive):
   #   [pm25, (spatial_lag), (roll_mean, roll_std), (sin_hour, cos_hour)]
   # A sample is dropped if any of its lag hours is missing.

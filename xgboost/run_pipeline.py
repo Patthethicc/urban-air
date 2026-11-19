@@ -26,7 +26,7 @@ if ROOT not in sys.path:
 
 import data  # noqa: E402
 
-STAGES = ('report', 'partitions', 'split', 'patch', 'ablation', 'test', 'geocp',
+STAGES = ('report', 'partitions', 'split', 'patch', 'ablation', 'pretrain', 'test', 'geocp',
           'save', 'infer', 'grid10', 'infer10', 'figures', 'checks', 'all')
 
 
@@ -168,15 +168,48 @@ def _fit_production_model(arm=None):
     else:
         X = build_design_matrix(df_train, arm)
     y = np.log1p(df_train['Value'].to_numpy())
-    model = xgb.XGBRegressor(n_estimators=n_est, random_state=42, tree_method='hist', n_jobs=-1,
-                             **params)
-    model.fit(X, y)
+    # XGB_INIT_FROM (a booster written by `--stage pretrain`) = transfer learning: the new trees are added to the pretrained ones.
+    # Unset (the default) this is the ordinary fit.
+    from training.transfer import fit_regressor, init_from_env
+    model = fit_regressor(params, n_est, X, y, seed=42, init_from=init_from_env())
     print(f"  deploying arm {arm}, {len(features)} features, fold {best_fold}'s hyperparameters, "
           f"n_estimators={n_est}")
     print(f"  fitted on {len(df_train):,} rows from {df_train['Grid_ID'].nunique()} training cells")
     info = {'arm': arm, 'best_fold': best_fold, 'params': params, 'n_estimators': n_est,
             'partitions': partitions, 'fold_doc': fold_doc, 'shape': X.shape}
     return model, features, info
+
+
+def stage_pretrain(sources=None, name='default', arm='A', exclude_months=(), n_estimators=600):
+    """Pretrain a booster on other cities' PM2.5 history (transfer learning; README of the XGBoost branch).
+
+    Reads data/Other Countries/<country>/<city>/ (other-country-scrapers/scrapers.ipynb), builds the temporal features, fills the morphology columns
+    with NaN and trains. Writes outputs/pretrained/<name>/pretrained_booster.json. Then fine-tune on Manila with
+        XGB_INIT_FROM=<that file>  python run_pipeline.py --stage test --test-arm <arm>
+    `arm` must be the arm the Manila model uses (the trees read columns by position): A (time + PM2.5 history) is the natural temporal-only choice."""
+    import glob as _glob
+    import pandas as pd
+    from training import transfer
+    from training.ablation import ARM_FEATURES, DEFAULT_PARAMS, build_design_matrix  # noqa: F401  (ARM_FEATURES: the column order)
+
+    root = os.path.join(os.path.dirname(data.ROOT), 'data', 'Other Countries')
+    names = list(sources) if sources else transfer.list_sources(root)
+    if not names:
+        raise SystemExit(f'no source cities under {root}: run other-country-scrapers/scrapers.ipynb first')
+    features = list(ARM_FEATURES[arm])
+    frames = []
+    for city in names:
+        df = transfer.read_city(os.path.join(root, city))
+        df['Location'] = df['Location'] + (len(frames) + 1) * 10 ** 9           # ids of different cities never collide
+        frames.append(transfer.temporal_features(df))
+        print(f'  {city}: {df["Location"].nunique()} stations, {len(df):,} hourly readings')
+    X, y, stations = transfer.source_xy(pd.concat(frames, ignore_index=True), features, exclude_months)
+    print(f'  pretraining arm {arm}: {X.shape[0]:,} rows, {X.shape[1]} features ({int(np.isnan(X).all(axis=0).sum())} all-NaN: morphology the sources do not have)')
+    out_dir = data.out('pretrained', name)
+    summary = transfer.pretrain_booster(X, y, stations, dict(DEFAULT_PARAMS), out_dir, n_estimators=n_estimators,
+                                        extra={'arm': arm, 'sources': names, 'exclude_months': list(exclude_months), 'features': features})
+    print(f"  saved {summary['booster']} ({summary['trees']} trees)")
+    return summary
 
 
 def stage_save(run_id=None, arm=None):
@@ -192,13 +225,13 @@ def stage_save(run_id=None, arm=None):
 
 
 def stage_infer(date=None, timestamps=None, out_dir=None, arm=None):
-    """City-wide surfaces for the four snapshot hours of each date (thesis Section 4.6.2)."""
+    """City-wide surfaces for the snapshot hours of each date (thesis Section 4.6.2): all 24 hours by default (data.SNAPSHOT_HOURS)."""
     import pandas as pd
     from inference.cell_inference import infer_timestamp
     from maps import surfaces
 
     model, features, info = _fit_production_model(arm)
-    hours = [8, 12, 17, 21]
+    hours = data.SNAPSHOT_HOURS      # all 24 hours unless XGB_SNAPSHOT_HOURS names others
     if timestamps:
         stamps = [pd.Timestamp(t) for t in timestamps]
     else:
@@ -236,6 +269,10 @@ def stage_infer(date=None, timestamps=None, out_dir=None, arm=None):
                                           vmin=lims[0], vmax=lims[1])
         if _mean:
             written.append(_mean)
+        # ---- the day as an animation: one frame per hour on the SAME colour scale (lims), then a GIF and a slideshow page
+        from maps import animation
+        written += animation.render_day_animation(
+            frames, os.path.join(sdir, day), day, vmin=lims[0], vmax=lims[1])
         print(f"  shared colour scale {lims[0]:.1f}-{lims[1]:.1f} ug/m3; panel + daily mean written")
     if written:
         print(f'  wrote {len(written)} file(s) under {out_dir or data.out("surfaces")}')
@@ -381,6 +418,13 @@ def main():
     ap.add_argument('--timestamp', nargs='+', default=None,
                     help='explicit timestamps for infer, e.g. "2026-04-11 08:00"')
     ap.add_argument('--run-id', default=None, help='artifact subfolder name (save stage)')
+    ap.add_argument('--source', nargs='+', default=None,
+                    help='pretrain: source city folders under data/Other Countries, e.g. vietnam/hanoi thailand/bangkok (default: all)')
+    ap.add_argument('--name', default='default', help='pretrain: name of the pretrained booster (outputs/pretrained/<name>/)')
+    ap.add_argument('--pretrain-arm', default='A', choices=['A', 'B', 'C', 'C+', 'TEXTURE'],
+                    help='pretrain: the arm whose columns the booster is trained on; use the same arm on Manila (A = time + PM2.5 history, no morphology)')
+    ap.add_argument('--exclude-months', nargs='+', type=int, default=[],
+                    help='pretrain: calendar months (1-12) left out of the source series, e.g. 2 3 4 for the regional burning season')
     ap.add_argument('--out-dir', default=None, help='output folder for the infer stage')
     ap.add_argument('--geocp-profile', default='default', choices=['default', 'shared'],
                     help='shared = the CNN-LSTM run\'s kernel x bandwidth search')
@@ -421,6 +465,8 @@ def main():
         stage_ablation(args.n_trials, arms=args.arms or ('A', 'B', 'C'), smoke=args.smoke,
                        row_stride=args.row_stride, untuned=args.untuned,
                        out_dir=args.ablation_out_dir)
+    elif args.stage == 'pretrain':
+        stage_pretrain(args.source, args.name, args.pretrain_arm, args.exclude_months)
     elif args.stage == 'test':
         stage_test(args.test_arm, seeds=args.test_seeds)
     elif args.stage == 'grid10':

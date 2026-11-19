@@ -119,9 +119,10 @@ def run(arm='C', out_dir=None, seeds=None):
     seeds = [int(x) for x in (seeds or [42])]
     preds, seed_r2 = [], []
     for sd in seeds:
-        model = xgb.XGBRegressor(n_estimators=n_est, random_state=sd, tree_method='hist',
-                                 n_jobs=-1, **params)
-        model.fit(Xtr, np.log1p(ytr))
+        # XGB_INIT_FROM (a booster written by `--stage pretrain`) = transfer learning: the new trees are added to the pretrained ones, and the
+        # test cells are scored exactly as before, so the result is comparable with the Manila-only run. Unset = the ordinary fit.
+        from training.transfer import fit_regressor, init_from_env
+        model = fit_regressor(params, n_est, Xtr, np.log1p(ytr), seed=sd, init_from=init_from_env())
         p = np.expm1(model.predict(Xte))
         preds.append(p)
         ss_res = float(((yte - p) ** 2).sum())

@@ -5,8 +5,13 @@
 # PM2.5 history is the spatial lag of its k nearest stations (data.yaml spatial_lag: k, weighting) at each
 # lag hour. That stand-in fills the PM2.5 and spatial-lag channels; patch, hour encoding and scalers are
 # exactly those of training.
-snapshot_hours: [8, 12, 17, 21]   # Output.txt: morning commute peak, midday baseline, afternoon peak, night decay
-                                  # (--date expands to these hours; --timestamp gives explicit hours)
+snapshot_hours: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+                                  # the whole day (default): a 24-hour animation / slideshow of how the air quality moves, and a true 24-hour
+                                  # mean. --date expands to these hours; --timestamp gives explicit hours. The old four-hour set is
+                                  # [8, 12, 17, 21] (Output.txt: morning commute peak, midday baseline, afternoon peak, night decay).
+                                  # Cost: one prediction surface per hour, so a 24-hour day takes 6 times as long as four hours.
+explain_hours: []                 # the hours --stage explain --date D runs Grad-CAM on. [] (default) = EVERY snapshot hour, so all 24 hours of a day and their aggregate.
+                                  # Each explained hour is slow: [8, 12, 17, 21] gives the four peak hours, six times faster. The hours must be in the infer run of that day.
 lag_reference: train    # train = neighbours are the proper-training stations (what the model and the GeoCP
                         #         calibration saw); all = every station with data
 openaq_only_from_year: 2026   # hours of this year and later take their stand-in history from the OpenAQ stations ONLY

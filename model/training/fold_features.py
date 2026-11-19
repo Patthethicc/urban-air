@@ -23,7 +23,7 @@ from training.dataset import load_meta
 class SpatialLagRecomputer:
     def __init__(self, cfg: dict):
         self.cfg = cfg
-        self.enabled = bool(cfg["data"]["spatial_lag"]["enabled"])
+        self.enabled = bool(cfg["data"]["spatial_lag"]["enabled"]) and "spatial_lag" in cfg["derived"]["feature_names"]    # off in the no-lag diagnostic
         if not self.enabled:
             return
         processed = Path(cfg["data"]["paths"]["processed_dir"])

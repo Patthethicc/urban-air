@@ -1,0 +1,145 @@
+{
+  "created": "2026-10-27T09:06:16",
+  "tune_config": {
+    "outer_folds": 3,
+    "inner_folds": 3,
+    "nested_evaluation": false,
+    "resume_from": "runs/from_2023_with_preinstall_v3/tuning/20261026_195401",
+    "n_calls": 12,
+    "n_initial_points": 5,
+    "acq_func": "EI",
+    "random_state": 42,
+    "row_stride": 8,
+    "search_epochs": false,
+    "max_epochs": 30,
+    "patience": 4,
+    "epochs_space": {
+      "type": "integer",
+      "low": 5,
+      "high": 25
+    },
+    "space": {
+      "learning_rate": {
+        "type": "real",
+        "low": 0.0001,
+        "high": 0.01,
+        "prior": "log-uniform"
+      },
+      "batch_size": {
+        "type": "integer",
+        "low": 128,
+        "high": 512
+      },
+      "cnn_kernel_size": {
+        "type": "categorical",
+        "values": [
+          3,
+          5,
+          7
+        ]
+      },
+      "cnn_filters": {
+        "type": "integer",
+        "low": 8,
+        "high": 48
+      },
+      "lstm_hidden_size": {
+        "type": "integer",
+        "low": 16,
+        "high": 128
+      },
+      "recurrent_dropout": {
+        "type": "real",
+        "low": 0.0,
+        "high": 0.5
+      }
+    }
+  },
+  "overrides": [
+    "data.paths.master_raster=../data/Morphology/master_raster_v3.tif",
+    "data.paths.sensor_locations_csv=../data/Combined Dataset/from_2023_with_preinstall/locations.csv",
+    "data.paths.sensor_csv_dir=../data/Combined Dataset/from_2023_with_preinstall/sensors",
+    "data.split.cv_assignment=by_station",
+    "data.paths.processed_dir=runs/from_2023_with_preinstall_v3/processed",
+    "data.paths.checkpoints_dir=runs/from_2023_with_preinstall_v3/checkpoints",
+    "data.paths.snapshots_dir=runs/from_2023_with_preinstall_v3/snapshots",
+    "data.paths.tuning_dir=runs/from_2023_with_preinstall_v3/tuning",
+    "tune.nested_evaluation=false",
+    "tune.resume_from=runs/from_2023_with_preinstall_v3/tuning/20261026_195401"
+  ],
+  "base_hyperparameters": {
+    "model": {
+      "spatial_cnn": {
+        "enabled": true,
+        "in_channels": 5,
+        "patch_px": 32,
+        "conv_channels": [
+          32,
+          64,
+          128
+        ],
+        "kernel_size": 3,
+        "feature_map": "pool",
+        "embed_dim": 64,
+        "dropout": 0.1
+      },
+      "temporal_lstm": {
+        "input_size": 4,
+        "hidden_size": 64,
+        "num_layers": 2,
+        "dropout": 0.1
+      },
+      "fusion_head": {
+        "hidden_dims": [
+          64,
+          32
+        ],
+        "dropout": 0.1,
+        "out_dim": 1
+      }
+    },
+    "train": {
+      "seed": 42,
+      "device": "auto",
+      "epochs": 50,
+      "batch_size": 256,
+      "num_workers": 0,
+      "optimizer": {
+        "name": "adam",
+        "lr": 0.001,
+        "weight_decay": 1e-05
+      },
+      "loss": "mse",
+      "early_stopping": true,
+      "early_stopping_patience": 8,
+      "grad_clip": 1.0,
+      "cv": {
+        "enabled": true
+      },
+      "final_epochs": null,
+      "runtime": {
+        "progress_every_s": 30,
+        "status_every_s": 300,
+        "stall_timeout_s": 600,
+        "hard_exit_grace_s": 60,
+        "max_hours": null,
+        "warn_hours": 2
+      }
+    }
+  },
+  "outer_results": [],
+  "outer_summary": {},
+  "final": {
+    "best_hyperparameters": {
+      "learning_rate": 0.000353034441942874,
+      "batch_size": 447,
+      "cnn_kernel_size": 7,
+      "cnn_filters": 42,
+      "lstm_hidden_size": 114,
+      "recurrent_dropout": 0.036067488976193836,
+      "epochs": 6
+    },
+    "best_inner_loss": 0.34354301042460483
+  },
+  "objective": "mean inner-fold best validation loss with early stopping (epochs not searched), scaled units, spatial lag recomputed per fold"
+}

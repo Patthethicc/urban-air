@@ -26,11 +26,30 @@ def test_the_highlight_threshold_is_the_text_limit_and_the_guideline_is_50(base_
     assert base_cfg["output"]["aqi"]["bins"][2]["upper"] == 45                      # unhealthy for sensitive groups 35.1-45
 
 
-def test_the_four_daily_snapshots_are_08_12_17_21(base_cfg):
+def test_a_date_is_the_whole_day_by_default_and_grad_cam_keeps_the_four_old_hours(base_cfg):
     stamps = expand_dates(["2025-07-01"], base_cfg["inference"]["snapshot_hours"])
-    assert [t.strftime("%H:%M") for t in stamps] == ["08:00", "12:00", "17:00", "21:00"]
+    assert [t.strftime("%H:%M") for t in stamps] == [f"{h:02d}:00" for h in range(24)]
     grouped = group_by_date(stamps + [pd.Timestamp("2025-07-02 12:00")])
-    assert [len(v) for v in grouped.values()] == [4, 1]
+    assert [len(v) for v in grouped.values()] == [24, 1]
+    from output.volume import explain_hours_of
+
+    assert explain_hours_of(base_cfg) == list(range(24))                                  # default: Grad-CAM explains every snapshot hour
+    assert explain_hours_of({"inference": {"snapshot_hours": [3, 4], "explain_hours": []}}) == [3, 4]     # empty = every snapshot hour
+    assert explain_hours_of({"inference": {"snapshot_hours": [3, 4], "explain_hours": [4]}}) == [4]        # or the hours you name
+
+
+def test_the_daily_mean_is_called_24_hour_only_with_24_snapshots():
+    from output.volume import mean_title
+
+    assert mean_title(24, pd.Timestamp("2025-07-01")) == "24-hour mean, 2025-07-01"
+    assert mean_title(4, pd.Timestamp("2025-07-01")) == "Mean of 4 snapshots, 2025-07-01"
+
+
+def test_panel_grid_keeps_the_old_layout_up_to_six_panels_and_fits_a_day_in_4_by_6():
+    from output.aqi_maps import panel_grid
+
+    assert panel_grid(4)[:2] == (2, 2) and panel_grid(1)[:2] == (1, 1)
+    assert panel_grid(24)[:2] == (4, 6) and panel_grid(8)[:2] == (3, 3) and panel_grid(12)[:2] == (3, 4)
 
 
 def test_daily_mean_needs_every_snapshot():

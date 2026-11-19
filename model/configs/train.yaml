@@ -23,6 +23,10 @@ cv:
   enabled: true         # spatial k-fold on the training stations; fold best epochs set the final epoch count
 resume: false           # true = continue the newest training run that was stopped before it finished (its finished CV folds are kept,
                         #        the fold that was running starts again). false = always start a new run. The Kaggle notebook sets it.
+init_from: null         # TRANSFER LEARNING: path of a checkpoint (.pt) whose weights start the model, e.g. the temporal branch pretrained on other
+                        #   cities (`--stage pretrain`, writes <pretrained_dir>/<name>/pretrained_lstm.pt). Layers are copied when their name and
+                        #   shape match; the temporal branch must match completely or the run stops. null = train from scratch (the default).
+freeze: []              # parts kept fixed while training: any of spatial (the CNN), temporal (the LSTM), head (the fusion head). [] = train everything.
 final_epochs: null      # override the epoch count of the final fit (null = mean best epoch of the folds)
 runtime:                # progress, hang detection, time budget (runtime_guard.py); a slow run is fine, a hung one is not
   progress_every_s: 30  # print a progress line inside long passes at least this often (0 = quiet)
