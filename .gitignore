@@ -3,7 +3,7 @@
 #eda_outputs/
 # Ignore "data" ONLY in the root directory (leading slash)
 data/
-other-country-scapers/
+other-country-scrapers/
 
 # secrets: the OpenAQ API key lives in .env files and must never be committed
 .env
