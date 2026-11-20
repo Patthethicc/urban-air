@@ -31,3 +31,7 @@ The server gives up when one query asks for too much. The scraper therefore fetc
 ## Extending the date range later
 
 Change `END` in the notebook (it is exclusive: `"2026-11-19"` includes all of 18 November) and run the download cell again. A sensor that was already downloaded is not fetched from the start: only the days after its last hour are requested and appended, and a station whose own last reading is already covered costs no request.
+
+## Why these stations and not all of them
+The selection logic (capital regions, the quality rules, the spatial-lag requirement, the four pools and the cross-validated choice) is written out, with the answer to "why not use all the stations", in
+`model/README.md`, section 2.20, "Which source stations are used, and why not all of them".

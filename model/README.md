@@ -16,13 +16,14 @@ What you get from one run:
 
 > **Status.** Runs on the real data in the repo's `data/` folder: a 10 m Master GeoTIFF (EPSG:32651, 5 bands,
 > 27 × 39 km) and the OpenAQ sensors (44 stations with readings, 2024-08-13 to 2026-10-15). The pipeline runs end to
-> end and 416 tests pass. The numbers quoted in this file come from short smoke runs (2 epochs), so they show that the
+> end and 500 tests pass. The numbers quoted in this file come from short smoke runs (2 epochs), so they show that the
 > wiring works, not what the model can reach. Three things to know before relying on results: the raster stops short of
 > the southern tip of the NCR ([2.14](#214-covering-the-whole-ncr)), a full-resolution city map takes hours on a CPU
 > ([2.6](#26-make-the-maps)), and the pipeline has not been trained to convergence on this data yet.
 
 ## Contents
 
+0. [The study in order: from data collection to results](#the-study-in-order-from-data-collection-to-results) (read this first for the story; sections 1 to 8 are the manual and the reference)
 1. [Quick start](#1-quick-start)
 2. [Tutorial: running it](#2-tutorial-running-it)
 3. [How it works](#3-how-it-works)
@@ -31,6 +32,122 @@ What you get from one run:
 6. [How it was checked](#6-how-it-was-checked)
 7. [Which thesis text became which code](#7-which-thesis-text-became-which-code)
 8. [Findings so far and the transfer-learning plan](#8-findings-so-far-and-the-transfer-learning-plan)
+
+---
+
+## The study in order: from data collection to results
+
+This section follows the work in the order it happens: **collect → clean and align → choose stations → train and compare → transfer learning → results**. Each step says what was done, why,
+the numbers, and where the detail lives. The rest of the file (sections 1 to 8) is the manual and the reference; read this part first when you need the story for the thesis or the panel.
+
+| Step | What happens | Where |
+|---|---|---|
+| A | Collect the Manila sensor data and the other cities' data | A.1 to A.3 |
+| B | Clean it and put it on a strict one-hour grid | B.1 to B.3 |
+| C | Choose stations: Manila's fixed test stations, the source stations | C.1, C.2 |
+| D | Train and compare the four Manila models, the learning curve | D |
+| E | Transfer learning: the pools and how the winner is chosen | E |
+| F | Results so far, and what is still to run | F |
+| G | Which manuscript sections each step feeds | G |
+
+### A. Data collection
+
+**A.1 Manila (target).** Two networks, combined into one dataset (`preprocessing/combine_dataset.py`, details in [2.1b](#21b-the-quezon-city-sensors-qc-data) and
+[2.1c](#21c-the-combined-cleaned-dataset-both-networks-three-year-ranges)): OpenAQ stations and the Quezon City (QC) network. The dataset used for every result so far is
+`from_2023_with_preinstall`: 85 stations, 1,216,537 readings, 2023-01-01 to 2026-10-15 for OpenAQ. **The QC files end on 2025-12-31**, so Quezon City stations have no readings in 2026. To bring the Manila data
+up to a later date run `update_manila_data.ipynb` (backs up the old folder, rebuilds the combined dataset, checks that the stations are the same); retrain every model afterwards, because
+results on a longer range are a different experiment from the earlier ones.
+
+**A.2 Other countries (sources for transfer learning).** `other-country-scrapers/scrapers.ipynb`, OpenAQ API v3 only. It looks at the **capital region** of each country (the counterpart of Manila's NCR): Hanoi,
+Bangkok and its metropolitan ring, Jakarta and Greater Jakarta, Kuala Lumpur and the Klang Valley, plus Ho Chi Minh City as the largest Vietnamese city. Range 2023-01-01 to 2026-11-19 (`END` is exclusive: it
+includes all of 18 November). The API key comes from `.env` (never committed). Things that made the download robust:
+- each sensor is fetched in **60-day windows**, each saved on its own, so a stop or an error resumes at that window; a window that the server answers with HTTP 408 (timeout) is halved and retried;
+- moving `END` later fetches only the missing days and appends them;
+- one failing sensor is skipped and listed, not fatal; the download cell is run again to retry it.
+
+**A.3 What was not used.** The Zenodo "HCMC / Bangkok hourly" files are CAMS model output, not measurements. Details and the other source-by-source critique: [2.21](#221-the-transfer-learning-reference-transferlearnpdf-what-holds-and-what-to-change).
+
+### B. Cleaning and the one-hour grid
+
+**B.1 Cleaning rules (before any alignment).** A reading is removed when it is not a number, at most 0.5 µg/m³ or negative (dropout), above 1,000, in the New Year's Eve fireworks hours, a QC reading from
+before the site's installation date (the kept-or-removed variants are the `*_with_preinstall` folders), or an isolated single-sensor spike. Each removed reading is listed with its reason in
+`excluded_readings.csv` (149 not a number, 5,352 at or below the floor, 176 above 1,000, 1,519 fireworks, 20,708 before installation, 451 spikes).
+
+**B.2 Putting every station on a strict one-hour grid** (`preprocessing/clean_loader.py`, settings `data.time` in `configs/data.yaml`). The data is not exactly hourly: sensors miss hours or report
+more than once in an hour. What the pipeline does, in order:
+1. **Hourly from the source.** The OpenAQ `/hours` endpoint already gives one value per hour (with a coverage percentage). The scraper labels an hour by its **start** (`time_label = "from"`, an assumption
+   not yet checked against the OpenAQ portal).
+2. **A complete hourly index per sensor** (`resample`, 1 h). If an hour has several readings the **mean** is taken; if it has none it is missing.
+3. **Short gaps are filled by linear interpolation: gaps of 24 hours or less** (`data.time.max_gap_hours: 24`).
+4. **Long gaps stay missing** (more than 24 hours): nothing is made up across a long outage.
+5. **A sample that touches a missing hour is dropped** (B.3).
+6. The hour of day is the city's own **local** hour (each source city is converted from UTC to its time zone).
+
+**How much was interpolated** (computed on `from_2023_with_preinstall`, 85 stations, from each station's first to its last reading):
+
+| | Station-hours | Share of the grid |
+|---|---|---|
+| Hourly slots on the grid | 1,404,039 | 100 % |
+| Measured | 1,240,019 | 88.3 % |
+| **Interpolated** (gap of 24 h or less) | 154,853 | **11.0 %** |
+| Left missing (gap of more than 24 h) | 9,167 | 0.7 % |
+
+There are 70,738 gaps: 70,647 are 24 hours or less and 91 are longer; the median gap is 1 hour and half of all gaps (37,286) are a single hour. The share varies by station (median 10 %, worst 36 %; 43 of 85 stations
+above 5 %). Interpolated hours are also in the targets, so a similar share of what is scored on the test stations is interpolated, not measured. A sensitivity check with a shorter cap (for example 3 hours)
+has **not been run**; do it if a panelist asks whether the results depend on the interpolation.
+
+**B.3 Why a sample with a missing hour is dropped, not filled.** The model reads the last three hours of PM2.5 (and the spatial lag, the inverse-distance-weighted mean of the five nearest stations at those hours) to
+predict the next hour. If the target, one of those three hours, or the neighbours' values at those hours are missing, there is no complete sample, and we leave it out rather than guess. A model trained on made-up
+values over long outages would learn our fill instead of PM2.5. Example: a sensor that is down for 3 days loses every sample whose target or whose three previous hours fall in those 72 hours. Counts on the same
+dataset: 1,394,354 samples have a complete own history (0.7 % of station-hours lost to missing hours); the final number is **1,360,277** (1,060,985 train, 299,292 test), 34,077 fewer (2.4 %) because the
+neighbouring stations had no data at those hours (the spatial lag). In total 3.1 % of the station-hours do not become a sample.
+
+### C. Choosing stations
+
+**C.1 Manila: the same test stations for every result.** The split is by station, never by row or time. The partition behind all results so far is 54 training, 13 calibration and 17 test stations
+(`model/configs/pinned_partition_2026-11.json`; 16 of the 17 are scored, as in every earlier result). `PIN_PARTITION` in `training_cells.ipynb` and `transfer_learning.ipynb` passes those stations to every stage,
+so a longer or updated dataset is scored on the same stations. If a pinned station is missing from new data, preprocessing stops and names it.
+
+**C.2 The source stations, and why not all of them.** Written out in [2.20, "Which source stations are used, and why not all of them"](#which-source-stations-are-used-and-why-not-all-of-them): capital regions only; the
+quality rules (at least 6,000 hours, 12 calendar months, 50 % of the hours present); the requirement that neighbours report in the same hours (Kuala Lumpur's two stations never overlap, so that city gives no
+window); and the four pools that are *tested* rather than assumed.
+
+### D. Training and comparing the Manila models
+
+Four models, one dataset (CNN-LSTM and LSTM-only, with and without GeoCP): `training_cells.ipynb` ([2.15](#215-four-models-on-kaggle-training_cellsipynb)), findings in [8.1](#81-what-the-four-models-showed).
+Then the learning curve ([2.16](#216-learning-curve-learning_curveipynb), result in [8.5](#85-result-of-step-1-the-learning-curve-run-locally-10-to-12-november-2026)). Both say the same: **the CNN branch adds no
+measurable accuracy over the temporal model** at 20 to 67 training stations. State it as "did not improve accuracy at these station counts", not "morphology has no effect on PM2.5". The no-lag diagnostic
+([2.19](#219-the-no-pm25-history-diagnostic-does-the-morphology-carry-signal-on-its-own)) is built and tested and **not run yet**.
+
+### E. Transfer learning
+
+Because the skill is in the temporal branch, an LSTM-only model is **pretrained on the other cities' PM2.5** and then fine-tuned on Manila (`transfer_learning.ipynb`, reference [2.20](#220-transfer-learning-of-the-temporal-side-other-cities--manila)).
+Checkpoints: `manila_only` (baseline), `single_<country>`, `mmd_top_10`, `all_sources`; each used as `finetune`, `head_only` or `zero_shot`. With `USE_CV = True` (the default) the pool is **chosen by spatial
+cross-validation on the Manila training stations** and its test R² is read once afterwards, so the test stations play no part in the choice. A failing job is listed and skipped, finished jobs are skipped on a re-run, and
+a new Kaggle session resumes from the saved output (the run cell prints `RESUMING: x of y jobs are already finished`).
+
+### F. Results so far
+
+**Manila models (test R², same 16 test stations).** CNN-LSTM 0.707 to 0.721, LSTM-only 0.718 to 0.724 across the four variants; previous-hour baseline 0.646 ([8.1](#81-what-the-four-models-showed), [8.5](#85-result-of-step-1-the-learning-curve-run-locally-10-to-12-november-2026)).
+
+**Transfer learning, first Kaggle run (20 November 2026), pool `single_indonesia` only** (5 Jakarta stations). Cross-validation is the 3-fold spatial CV on the Manila training stations.
+
+| checkpoint | variant | CV R² | test R² | test RMSE | test MAE | folds won vs `manila_only` |
+|---|---|---|---|---|---|---|
+| `manila_only` | from scratch | 0.7174 | 0.7267 | 5.349 | 3.329 | n/a |
+| `single_indonesia` | `finetune` | 0.7173 | 0.7258 | 5.358 | 3.334 | 1 of 3 |
+| `single_indonesia` | `head_only` | 0.7062 | 0.7102 | 5.508 | 3.409 | 0 of 3 |
+| `single_indonesia` | `zero_shot` | not cross-validated | 0.6465 | 6.083 | 4.036 | n/a |
+
+Reading: pretraining on Jakarta **does not improve** on Manila-only (a difference of −0.0001 in CV R² and −0.0009 in test R² is nothing); freezing the pretrained LSTM and training only the head is worse; with no Manila
+training at all the model reaches R² 0.646, which is **no better than repeating the previous hour** (RMSE 6.08 against 6.08). This is one pool and one pass (Jakarta has 5 stations); do not generalise from it.
+The Malaysian pool failed because Kuala Lumpur gives no windows (B.3, C.2). **Still to run:** `single_thailand`, `single_vietnam`, `mmd_top_10`, `all_sources`; the no-lag diagnostic; a 24-hour map and Grad-CAM on real data;
+the sensitivity check of B.2. If every pool matches `manila_only`, the finding is "transfer from other Southeast Asian capitals did not help, in this setup", which is a result.
+
+### G. Which manuscript sections each step feeds
+
+A is 4.1.4 (source-domain data acquisition) and the data description of chapter 4; B is 4.2 (cleaning, harmonisation); C is 4.2.6 and 4.3.4; D is 4.3.5, 4.4.4 and 4.4.5; E is 4.3.4 and 4.4.7; F is the results chapter.
+The full list with search keywords is in [8.7](#87-manuscript-sections-to-add-to-the-table-of-contents).
 
 ---
 
@@ -827,6 +944,59 @@ same arm on both sides (the trees read the columns by position); arm A (time + P
 main notebook (3 folds over the Manila training stations, the pretrained weights loaded afresh in each fold; the pretraining never sees Manila, so nothing leaks). The pool is ranked by its
 **CV R²** and by in how many folds it beats `manila_only`; its **test R² is read once, after the choice**. Cost: about four times a plain fit (minutes for an LSTM-only model); the
 `zero_shot` variant is never cross-validated. `USE_CV = False` compares on the test stations directly (quick, but the winner's test score is then a little optimistic: say so if you report it).
+
+#### Which source stations are used, and why not all of them
+
+The question a panel will ask: *"OpenAQ has hundreds of stations in these cities. Why not train on all of them?"* The answer is a chain of filters, each with a reason, and a **test** at the
+end that lets the data (not our opinion) decide whether using more stations helps.
+
+**1. Where we look (the scraper).** Only the **capital region** of each country (the counterpart of Manila's National Capital Region, about 640 km²): Hanoi, Bangkok with its metropolitan ring,
+Jakarta with Greater Jakarta, Kuala Lumpur with the Klang Valley, plus Ho Chi Minh City as the largest Vietnamese city. Only **fixed stations that report PM2.5** (mobile units have no place, other
+pollutants are not our target). All from OpenAQ, the same network as the Manila `openaq_*` files, so values are defined the same way. The Zenodo "HCMC / Bangkok" files are **not** used: they are CAMS model output, not measurements.
+
+**2. Is the station good enough (quality rules, `scrapers.ipynb`).** A station is kept only with at least **6,000 hourly values** (about 8 months), values in **12 or more different calendar
+months** (so it sees a whole seasonal cycle, not just the dry season), and **50 % or more of the hours** present between its first and last reading. Every station, kept or not, is listed with its
+reason in `station_quality.csv` (`kept`, `reason`), together with `is_monitor` (reference-grade monitor or low-cost sensor), so the choice can be audited. Result of the run of 19 November 2026
+(local `data/Other Countries`):
+
+| City | Stations found | Kept | Most common reasons for dropping |
+|---|---|---|---|
+| Bangkok | 272 | 125 | too few hours, fewer than 12 months, not downloaded (rate limit) |
+| Hanoi | 38 | 11 | too few hours, no values in the range |
+| Jakarta | 28 | 5 | too few hours, no values in the range |
+| Kuala Lumpur | 22 | 2 | too few hours |
+| Ho Chi Minh City | 20 | 1 | too few hours, no values in the range |
+
+**3. Can the model use it (`transfer/source_data.py`).** The model's input is the station's own last three hours **and the spatial lag** (the inverse-distance-weighted mean of the five nearest stations of the **same city** at those hours). A
+window exists only if both are present, so a station needs neighbours that report **at the same time**. Kuala Lumpur's two kept stations never overlap (one stops in October 2024, the other
+starts in December 2024), so that city gives **no window** and is left out with a message. Source values are scaled with **Manila's** scalers, and the hour of day is the city's own local hour.
+
+**4. Which of the usable stations (the pools, `transfer_learning.ipynb`).** We do **not** pick by hand. Four kinds of pool are trained and compared with a Manila-only model on the same data:
+
+| Pool | Stations used | What it tests |
+|---|---|---|
+| `manila_only` | none (baseline) | does any pretraining help at all |
+| `single_<country>` | all kept stations of one country | which country transfers, the cleanest control |
+| `mmd_top_10` | the 10 stations whose PM2.5 distribution is closest to the Manila **training** stations | does a smaller, more similar pool beat a big one |
+| `all_sources` | every kept station | the "why not all" case, tested rather than assumed |
+
+*Closest* is the squared maximum mean discrepancy (RBF kernel) between a station's samples of `[log(1 + PM2.5), sin(hour), cos(hour)]` and the same samples of the Manila training stations
+(`transfer/select.py`): level, spread and daily cycle. It uses PM2.5 and the hour of day only and **never the Manila test stations**. The pool that is **chosen** is the one with the best
+**cross-validated R²** on the Manila training stations (and the most folds won); its test R² is read once afterwards.
+
+**Why not simply use all stations, in short**
+- **More is not always better in transfer learning.** Stations from another city can differ in level, in daily cycle, in sensor type and in what burns or traffics around them; a model that
+  learns them can do worse on Manila than one that never saw them (*negative transfer*). Whether this happens here is exactly what `all_sources` against `manila_only` measures.
+- **"All" is not "balanced".** Bangkok contributes 125 of the 144 kept stations (87 %), so `all_sources` is mostly Bangkok, not a regional average. `single_<country>` and `mmd_top_10` show
+  whether that matters.
+- **Seasonal shifts.** Regional biomass-burning haze (roughly January to April in Thailand and northern Vietnam) is a source Manila does not share; `transfer.exclude_months` can remove those months from
+  the source series to test it.
+- **Weak stations add noise, not information.** A station with a few weeks of data or half its hours missing teaches the model gaps; hence the three quality rules.
+- **No peeking.** The choice of stations never looks at the Manila test stations (similarity uses the training stations; the pool is chosen by cross-validation).
+
+**Limits to state honestly.** Similarity of the distribution is not proof of benefit (a close station can still transfer badly), which is why it is tested rather than trusted. The thresholds (6,000
+hours, 12 months, 50 %) are our choices, not a published standard; for a stricter rule see the US EPA data-completeness rule (75 % of samples per quarter, 40 CFR 50 Appendix N) and the EU
+Directive 2008/50/EC (90 % data capture), and report a sensitivity check if a panelist asks. Low-cost sensors are kept and flagged (`is_monitor`), not corrected for humidity.
 
 **What was checked.** Unit tests for each piece (warm start, freezing, source windows, station ranking, the pretrain stage, the scraper, the XGBoost module; `tests/test_transfer.py`,
 `checks/test_transfer.py`), and a full chain on real Manila data with a synthetic source city (preprocess, pretrain, `finetune` / `head_only` / `zero_shot`, report). **Not run:** the real source cities

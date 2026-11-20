@@ -67,13 +67,22 @@ def pretrain(cfg: dict, name: str = "default", sources: list[str] | None = None)
     for i, city in enumerate(names):
         X, y, meta = city_windows(root / city, cfg, id_offset=(i + 1) * CITY_ID_STEP, exclude_months=tr["exclude_months"])
         print(f"  {city}: {meta['location_id'].nunique()} stations, {len(y):,} windows")
+        if not len(y):                    # e.g. a city whose few stations never report in the same hours: no spatial lag, so every window is dropped
+            print(f"    -> {city} gives no training window and is left out: a window needs the station's own last hours AND the same hours of its "
+                  f"neighbouring stations (spatial lag). With stations that never report at the same time, or a single station, none exists.")
+            continue
         parts.append((X, y, meta))
         long = hourly_long(root / city, cfg)
         long["location_id"] += (i + 1) * CITY_ID_STEP
         longs.append(long)
+    if not parts:
+        raise SystemExit(f"no training window in any of the source cities {names}: see the lines above for why (stations that never overlap in time, "
+                         f"too few stations, or exclude_months). Choose other cities for this checkpoint.")
 
     # ---- which stations look like Manila (always written; used to keep only the top k when transfer.top_k_stations is set)
-    ranking = rank_stations(pd.concat(longs, ignore_index=True), manila_training_sample(cfg), seed=tr["seed"])
+    has_windows = set(int(i) for p in parts for i in p[2]["location_id"].unique())          # a station without any window cannot be pretrained on: do not rank it
+    all_long = pd.concat(longs, ignore_index=True)
+    ranking = rank_stations(all_long[all_long["location_id"].isin(has_windows)], manila_training_sample(cfg), seed=tr["seed"])
     ranking["city"] = [names[int(i // CITY_ID_STEP) - 1] for i in ranking["location_id"]]
     ranking.to_csv(out_dir / "station_ranking.csv", index=False)
     keep_ids = set(ranking["location_id"].head(int(tr["top_k_stations"]))) if tr["top_k_stations"] else None
