@@ -130,19 +130,59 @@ a new Kaggle session resumes from the saved output (the run cell prints `RESUMIN
 
 **Manila models (test R², same 16 test stations).** CNN-LSTM 0.707 to 0.721, LSTM-only 0.718 to 0.724 across the four variants; previous-hour baseline 0.646 ([8.1](#81-what-the-four-models-showed), [8.5](#85-result-of-step-1-the-learning-curve-run-locally-10-to-12-november-2026)).
 
-**Transfer learning, first Kaggle run (20 November 2026), pool `single_indonesia` only** (5 Jakarta stations). Cross-validation is the 3-fold spatial CV on the Manila training stations.
+**Transfer learning, all pools (Kaggle, 20 to 22 November 2026; `transfer_learning.ipynb`, `USE_CV = True`, 16 test stations).** CV R² is the 3-fold spatial cross-validation on the Manila training stations; the
+folds are the same for every pool. Files: `Outputs/Presentation/7_transfer_learning/`.
 
-| checkpoint | variant | CV R² | test R² | test RMSE | test MAE | folds won vs `manila_only` |
-|---|---|---|---|---|---|---|
-| `manila_only` | from scratch | 0.7174 | 0.7267 | 5.349 | 3.329 | n/a |
-| `single_indonesia` | `finetune` | 0.7173 | 0.7258 | 5.358 | 3.334 | 1 of 3 |
-| `single_indonesia` | `head_only` | 0.7062 | 0.7102 | 5.508 | 3.409 | 0 of 3 |
-| `single_indonesia` | `zero_shot` | not cross-validated | 0.6465 | 6.083 | 4.036 | n/a |
+| pool (pretrained on) | `finetune` CV R² | `finetune` test R² | folds won | `head_only` test R² | `zero_shot` test R² |
+|---|---|---|---|---|---|
+| `manila_only` (nothing) | 0.7174 | 0.7267 | n/a | n/a | n/a |
+| `single_indonesia` (Jakarta, 5 stations) | 0.7173 | 0.7258 | 1 of 3 | 0.7102 | 0.6465 |
+| `single_thailand` (Bangkok, 125) | 0.7177 | 0.7257 | 2 of 3 | 0.7173 | 0.6937 |
+| `single_vietnam` (Hanoi + HCMC, 12) | 0.7174 | 0.7200 | 1 of 3 | 0.7075 | 0.6534 |
+| `mmd_top_10` (the 10 closest stations, all in Bangkok) | 0.7172 | 0.7262 | 1 of 3 | 0.6920 | 0.6686 |
+| `all_sources` (every kept station) | 0.7181 | 0.7209 | 3 of 3 | 0.7161 | 0.6922 |
+| `single_malaysia` | not run: Kuala Lumpur gives no windows (B.3, C.2) | | | | |
 
-Reading: pretraining on Jakarta **does not improve** on Manila-only (a difference of −0.0001 in CV R² and −0.0009 in test R² is nothing); freezing the pretrained LSTM and training only the head is worse; with no Manila
-training at all the model reaches R² 0.646, which is **no better than repeating the previous hour** (RMSE 6.08 against 6.08). This is one pool and one pass (Jakarta has 5 stations); do not generalise from it.
-The Malaysian pool failed because Kuala Lumpur gives no windows (B.3, C.2). **Still to run:** `single_thailand`, `single_vietnam`, `mmd_top_10`, `all_sources`; the no-lag diagnostic; a 24-hour map and Grad-CAM on real data;
-the sensitivity check of B.2. If every pool matches `manila_only`, the finding is "transfer from other Southeast Asian capitals did not help, in this setup", which is a result.
+The previous-hour baseline has R² 0.646.
+
+**Reading**
+- **No pool improves on training on Manila alone.** The best CV R² is `all_sources` at +0.0007 over `manila_only` (3 of 3 folds), but its test R² is 0.0058 lower. The per-fold R² of every pool differs from `manila_only` by
+  about 0.001, while the folds themselves range from 0.68 to 0.74 (spread about 0.03), so the differences between pools are 30 or more times smaller than the fold-to-fold differences: noise. By the rule
+  in E (integrate a pool only if it wins on CV R² and in most folds by more than the spread), **no pool is integrated into `training_cells.ipynb`**.
+- **Freezing the pretrained LSTM (`head_only`) is worse in every pool** (0 of 3 folds each, test R² 0.692 to 0.717): the Manila hours still carry information the source cities do not.
+- **Without any Manila training, a Bangkok-based model reaches R² 0.69**, clearly above repeating the previous hour (0.646) but below Manila-only (0.727); Jakarta and Hanoi/HCMC pools stay at the level of the previous hour.
+  So some of the temporal behaviour transfers, but fine-tuning on Manila gives it back no more than what Manila alone already gives.
+- **The "closest to Manila" ranking did not pick a better pool.** All 10 stations of `mmd_top_10` are in Bangkok (the median distance is 0.018 for Bangkok against 0.06 to 0.10 for the other cities), and that pool is
+  no better than `single_thailand`; its zero-shot score (0.669) is lower than Bangkok's (0.694).
+- **Source sizes differ a lot.** Pretraining used 106 training stations for Bangkok, 4 for Jakarta, 9 for Hanoi and HCMC, 120 for `all_sources`. Jakarta and Vietnam are weak sources because they are small, not
+  necessarily because they differ more from Manila.
+- **Limits.** One run per pool; a single fine-tuning setting (up to 20 epochs per fold with early stopping, the final fit at the mean best epoch of the folds); only temporal PM2.5 history transfers (no weather, no morphology);
+  the Manila dataset is the October range (1,360,277 samples, the same count as in B.3). Read it as: **transfer from Southeast Asian capitals did not help in this setup**, not as a proof that transfer learning cannot help Manila.
+
+**Why transfer learning is not applicable here, and why these tests (short version).** The full reasoning, the per-fold numbers and the references are in
+[README_TRANSFER_LEARNING.md](README_TRANSFER_LEARNING.md).
+- *Why it does not help.* (1) The target is **not data-scarce**: transfer learning is defined for a target with too little data (Pan and Yang, 2010), the air-quality studies that report gains use sparse target sites or small target-data budgets
+  (Wei et al., 2016; Yang et al., 2023; Vrbančič et al., 2026), and pretraining mostly speeds up early training without raising final accuracy once the target has enough data (He et al., 2019); Manila has 68 training stations and about
+  1.06 million samples, and our learning curve is nearly flat (0.716 at 20 stations, 0.724 at 67). (2) The **sources differ**: the error on the target depends on how far the domains are apart (Ben-David et al., 2010); mean PM2.5 is 18.9 µg/m³ for Manila,
+  23.0 Bangkok, 32.2 Ho Chi Minh City, 38.4 Hanoi, 42.7 Jakarta. (3) **Negative transfer** is possible (Wang et al., 2019); here it is small (within 0.007 R²), and freezing the source weights is clearly worse. (4) The task (next hour from the last three hours
+  and the neighbours') is dominated by persistence, learned quickly from Manila alone (an interpretation, not tested). It does **not** show that transfer cannot help a city with few stations; that regime was not tested (5, 10, 20 stations with and without pretraining would test it).
+- *Why these tests.* `manila_only` is the required no-transfer control (Pan and Yang, 2010); single-country pools isolate which source helps (Wei et al., 2016); `all_sources` checks for negative transfer (Wang et al., 2019); `mmd_top_10` selects sources by a
+  measured distribution distance (Gretton et al., 2012; Ben-David et al., 2010); `finetune` against `head_only` shows whether the pretrained layers are general (Yosinski et al., 2014); `zero_shot` and the previous-hour baseline show what transfers without
+  target data and whether the model adds skill over persistence (Murphy, 1988); the pool is chosen by **spatial cross-validation** because neighbouring stations are correlated (Roberts et al., 2017; Meyer et al., 2019), and the test stations are read once
+  afterwards because choosing on the reporting data inflates the score (Cawley and Talbot, 2010).
+
+**What the three variants do (the dial from trusting the source to adapting to Manila).** `zero_shot`: the model pretrained on other cities, scored on Manila with **no Manila training** (one pass at learning rate 0, so no weight moves); it shows how much carries
+over without any Manila data. `head_only`: the pretrained **LSTM is frozen** (`train.freeze = ["temporal"]`) and only the final fusion layer is trained on Manila; it shows whether the LSTM's patterns are general enough to use as they are. `finetune`: start from the
+pretrained weights and train everything on Manila (the usual transfer). Reading: `zero_shot` of the Bangkok pools reaches R² 0.69 (above the previous-hour baseline 0.646, below Manila-only 0.727; Jakarta and Vietnam stay at the baseline); `head_only` is worse than
+Manila-only in every pool (0 of 3 folds); `finetune` ends equal to Manila-only. Accuracy rises as the model may adapt more to Manila, which is the pattern when the source adds little that Manila's own data lacks. `zero_shot` and `head_only` also use the pretrained final layer and
+the Manila-fitted scalers, so they test the whole pretrained model, not the LSTM alone.
+
+**Does more data from different sources help, and what if we force more?** Here, **no**. `all_sources` (120 stations, about 2.6 million windows) gained +0.0007 CV R² (noise) and lost 0.0058 test R²; Bangkok's 106 stations did no better than Jakarta's 5 in fine-tuning
+(0.7257 against 0.7258). Only more *Manila* data helped, and only a little (+0.008 R² from 20 to 67 stations). Different sources add a mismatch in level and pattern. Forcing more onto the model (freezing more, weighting the source more, adding distant cities such as Jakarta
+at 42.7 µg/m³ against Manila's 18.9, longer pretraining) could cause **negative transfer** (Wang et al., 2019); a trace shows where the model leans on the source weights (`head_only` is 0.009 to 0.035 R² worse, `zero_shot` far below), and fine-tuning guards against it. That is a risk,
+not something measured. Not tested: a city with few stations, training on Manila and the other cities together, other source cities. Say "more data from different cities did not improve Manila predictions", not "more data never helps". Detail: [README_TRANSFER_LEARNING.md](README_TRANSFER_LEARNING.md), sections 2b and 3.6.
+
+**Still to run:** the no-lag diagnostic, a 24-hour map and Grad-CAM on real data, and the sensitivity check of B.2.
 
 ### G. Which manuscript sections each step feeds
 
@@ -939,6 +979,8 @@ transfers **PM2.5 history only**.
 temporal features (the lags, rolling statistics and calendar encodings of `prep.py`) from the source cities, fills the morphology columns with NaN (XGBoost handles missing values), trains a booster and
 saves `outputs/pretrained/<name>/pretrained_booster.json`; with `XGB_INIT_FROM=<that file>` the `test` stage and the production fit **add** the Manila trees on top of the pretrained ones. Use the
 same arm on both sides (the trees read the columns by position); arm A (time + PM2.5 history, no morphology) is the temporal-only choice.
+
+The results of the whole experiment, with the reasoning and the references, are also in the stand-alone [README_TRANSFER_LEARNING.md](README_TRANSFER_LEARNING.md).
 
 **Choosing the pool without the test stations.** `transfer_learning.ipynb` has `USE_CV` (default `True`). Every checkpoint is then fitted with the same spatial cross-validation as the
 main notebook (3 folds over the Manila training stations, the pretrained weights loaded afresh in each fold; the pretraining never sees Manila, so nothing leaks). The pool is ranked by its

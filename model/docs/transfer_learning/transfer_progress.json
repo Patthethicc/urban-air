@@ -1,0 +1,31 @@
+{
+ "finished": [
+  "manila_only/scratch",
+  "single_indonesia/finetune",
+  "single_indonesia/head_only",
+  "single_indonesia/zero_shot",
+  "single_thailand/finetune",
+  "single_thailand/head_only",
+  "single_thailand/zero_shot",
+  "single_vietnam/finetune",
+  "single_vietnam/head_only",
+  "single_vietnam/zero_shot",
+  "mmd_top_10/finetune",
+  "mmd_top_10/head_only",
+  "mmd_top_10/zero_shot",
+  "all_sources/finetune",
+  "all_sources/head_only",
+  "all_sources/zero_shot"
+ ],
+ "not_finished": [
+  "single_malaysia/finetune",
+  "single_malaysia/head_only",
+  "single_malaysia/zero_shot"
+ ],
+ "failed": {
+  "single_malaysia/finetune": "stage pretrain failed (exit 1)",
+  "single_malaysia/head_only": "skipped: the pool could not be pretrained (or is in SKIP_POOLS)",
+  "single_malaysia/zero_shot": "skipped: the pool could not be pretrained (or is in SKIP_POOLS)"
+ },
+ "hours_used_this_session": 2.63
+}
