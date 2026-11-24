@@ -1,0 +1,27 @@
+experiment,seed,what,test_r2,r2_gain,gain_ci_low,gain_ci_high,test_rmse,test_mae,rmse_above_30,own_rows,own_r2,parameters
+recommended,42,"the elements that helped, together: 24 h window + weather incl. the target hour + time of year",0.7297,0.0186,0.015,0.0218,5.3217,3.3156,12.3206,298683,0.7297,171809
+amouei_full,42,"everything of Amouei: network, 24 h, year, weather, traffic, LCZ",0.7245,0.0133,0.0085,0.0185,5.3728,3.3264,12.5445,298683,0.7245,548865
+window24,42,24 h input window instead of 3 h,0.7233,0.0122,0.0093,0.0147,5.3841,3.3618,12.355,298683,0.7233,169073
+amouei_lstm_w24,42,Amouei network with the 24 h window,0.7225,0.0114,0.0079,0.0147,5.392,3.3178,12.7532,298683,0.7225,532481
+weather_lead1,42,+ weather incl. the target hour (each step carries the next hour's weather),0.7157,0.0046,0.0028,0.0061,5.4577,3.4259,12.2322,299292,0.7157,170897
+weather,42,"+ weather at the lag hours (temperature, humidity, wind vector)",0.7142,0.003,0.002,0.0039,5.4726,3.4354,12.2744,299292,0.7142,170897
+amouei_lstm,42,"Amouei network: LSTM 256-128-64-32 + dense 128, dropout 0.5 (3 h window)",0.7133,0.0021,0.0004,0.0041,5.4811,3.3852,12.4821,299292,0.7133,532481
+window12,42,12 h input window (between the main model's 3 h and Amouei's 24 h),0.713,0.0018,-0.0036,0.007,5.484,3.4171,12.9932,299031,0.713,169073
+year,42,+ time of year (sin/cos day of year),0.7119,0.0007,-0.0,0.0016,5.4943,3.4221,12.3559,299292,0.7119,169985
+baseline,42,"the main model (3 h window, LSTM 2 x 114, PM2.5 + spatial lag + hour)",0.7111,0.0,,,5.5013,3.4566,12.3106,299292,0.7112,169073
+road_density,42,+ traffic proxy (street share of the 320 m patch),0.7092,-0.0019,-0.0033,-0.0004,5.5195,3.467,12.3927,299292,0.7093,169529
+lcz_proxy,42,+ LCZ-like class of the station (one-hot),0.7092,-0.0019,-0.0035,-0.0004,5.5196,3.4621,12.3524,299292,0.7092,173177
+morphology_tabular,42,+ morphology band means as LSTM inputs (instead of a CNN),0.7068,-0.0044,-0.0087,-0.0001,5.5428,3.4562,12.7271,299292,0.7068,171353
+recommended,43,"the elements that helped, together: 24 h window + weather incl. the target hour + time of year",0.7258,0.0172,0.0149,0.0202,5.3599,3.3401,12.0301,298683,0.7258,171809
+window24,43,24 h input window instead of 3 h,0.7218,0.0132,0.0105,0.0166,5.3987,3.3631,12.1782,298683,0.7218,169073
+amouei_full,43,"everything of Amouei: network, 24 h, year, weather, traffic, LCZ",0.7205,0.0119,0.008,0.0162,5.4111,3.3669,12.2492,298683,0.7205,548865
+window12,43,12 h input window (between the main model's 3 h and Amouei's 24 h),0.7164,0.0077,0.0035,0.0125,5.4514,3.3658,12.5811,299031,0.7164,169073
+weather_lead1,43,+ weather incl. the target hour (each step carries the next hour's weather),0.7152,0.0066,0.0047,0.0081,5.4626,3.4746,12.2011,299292,0.7152,170897
+weather,43,"+ weather at the lag hours (temperature, humidity, wind vector)",0.7141,0.0055,0.0043,0.0066,5.4734,3.4773,12.2714,299292,0.7141,170897
+amouei_lstm_w24,43,Amouei network with the 24 h window,0.7105,0.0019,-0.0014,0.0061,5.5075,3.4432,12.1603,298683,0.7105,532481
+road_density,43,+ traffic proxy (street share of the 320 m patch),0.709,0.0004,-0.0023,0.0027,5.5215,3.5176,12.4301,299292,0.709,169529
+year,43,+ time of year (sin/cos day of year),0.709,0.0003,-0.0003,0.001,5.5221,3.5394,12.1974,299292,0.709,169985
+amouei_lstm,43,"Amouei network: LSTM 256-128-64-32 + dense 128, dropout 0.5 (3 h window)",0.7087,0.0001,-0.0016,0.0021,5.5247,3.5116,12.138,299292,0.7087,532481
+baseline,43,"the main model (3 h window, LSTM 2 x 114, PM2.5 + spatial lag + hour)",0.7086,0.0,,,5.5253,3.5308,12.1797,299292,0.7086,169073
+lcz_proxy,43,+ LCZ-like class of the station (one-hot),0.7085,-0.0001,-0.0028,0.0025,5.5261,3.52,12.405,299292,0.7086,173177
+morphology_tabular,43,+ morphology band means as LSTM inputs (instead of a CNN),0.7077,-0.0009,-0.0054,0.0038,5.5342,3.4925,12.7074,299292,0.7077,171353

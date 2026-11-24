@@ -1,0 +1,652 @@
+HOW THE CNN-LSTM PIPELINE WAS BUILT AND HOW IT RUNS
+====================================================
+Folder: model/        Run everything from inside model/.
+The same content, formatted as Markdown and followed by a step-by-step tutorial, is in README.md.
+Sources: Preprocessing.txt, Training.txt (thesis methodology), the pilot notebook
+         pilot testing/CNN-LSTM/Extra_Preprocessing_pipeline_FIXED.ipynb.
+
+
+1. FOLDER MAP
+-------------
+configs/            data.yaml  model.yaml  train.yaml  tune.yaml  geocp.yaml  report.yaml
+preprocessing/      clean_loader, spatial_partitioner, spatial_lag, temporal_window_builder,
+                    spatial_patch_extractor, multimodal_aligner, scalers,
+                    vector_sanitizer, raster_harmonizer, master_raster_builder (rasters stage)
+networks/           spatial_cnn, temporal_lstm, fusion_head, dual_branch_net
+training/           dataset, loss, metrics, trainer, checkpoint, predict,
+                    fold_features (per-fold spatial lag), tuning (Bayesian search), run_info
+uncertainty/        geocp, geocp_surface (per-cell interval rasters)
+inference/          cell_inference (a prediction for every raster cell)
+output/             volume (snapshots -> volume, daily mean, summary), aqi_maps (AQI-coloured maps)
+explain/            gradcam, gradcam_plots (Grad-CAM on the CNN branch)
+reporting/          snapshot_generator, plotters, spatial_bias (Moran's I / LISA)
+tests/              pytest suite (see section 12)
+processed/ checkpoints/ tuning/ snapshots/    generated output, git-ignored
+
+
+2. THE STAGES (python run_pipeline.py --stage <name>)
+-----------------------------------------------------
+coverage    read-only: does the Master GeoTIFF cover every sensor / the whole NCR? (also runs inside preprocess)
+rasters     one-off: vectors + rasters -> Master GeoTIFF (not needed with data/Morphology/master_raster_v2.tif)
+preprocess  clean -> partition by location -> spatial lag -> windows -> patches -> scale -> save
+tune        Bayesian search with nested spatial CV  -> tuning/<id>/best_hyperparameters.json
+train       spatial CV on the training stations + final fit -> checkpoints/<run_id>/
+geocp       conformal intervals on top of the trained model -> snapshots/<run_id>/
+bias        Moran's I / LISA on the out-of-fold residuals -> snapshots/<run_id>/
+surface     per-cell GeoCP interval rasters from ANY point-prediction raster
+infer       city-wide inference + maps: daily volume, GeoCP intervals, 24 h mean, AQI maps
+explain     Grad-CAM of the hottest and coldest cells of one inferred snapshot
+report      SUMMARY.md + metrics_summary.json + plots + tables (runs geocp and bias first if they are missing)
+all         preprocess -> train -> geocp -> bias -> report
+clean       RESET (alias reset): dry run listing the generated outputs; --yes deletes them (README 2.13)
+Any config value can be changed for one run:  --override section.key=value
+Train with tuned values:                      --stage train --tuned
+
+
+3. PREPROCESSING (Preprocessing.txt)
+------------------------------------
+0. INPUT DATA is the repo's data/ folder (configs/data.yaml): data/Morphology/master_raster_v2.tif (10 m, EPSG:32651,
+   5 bands: building_height_mean, building_height_stddev, ndvi_mean, building_density, street_aspect_ratio_mean) and
+   data/OpenAQ (45 sensor files, 46 sensor locations). data/QC Data (Quezon City network, wide yearly tables) is converted to per-sensor
+   qcdata_<id>_*.csv by preprocessing/qc_convert.py (columns paired with sites in configs/qc_column_map.csv; ids 9000001-9000040;
+   Asia/Manila assumed). The loader accepts openaq_ and qcdata_ files, and the sensor paths of data.yaml may be lists, so the two
+   networks can be used together; data.yaml reads OpenAQ only until it is pointed at the converted folder. The 2024 QC sites
+   report before their listed installation dates and look backfilled (r~0.97 with the network median): see --trim-before-install.
+   A coverage check runs first: sensors outside the raster are skipped, which crops the study area, so they are
+   listed (the Tunasan station in Muntinlupa is 2.3 km south of the raster) and data.coverage.strict can stop the run.
+   Set data.paths.boundary to the NCR boundary to measure the missing area exactly.
+0b. A cleaned, combined copy of both networks exists (python -m preprocessing.combine_dataset -> data/Combined Dataset/, with the
+   full record and two ranges that drop 2021-2022 and 2021-2023). It removes empty, <=0.5 ug/m3, >1000, New Year window, QC
+   pre-installation and lone-spike readings (each listed in excluded_readings.csv) and writes per-sensor files the loader reads
+   unchanged; data.yaml points at one range's locations.csv and sensors/ folder to use it. Each range also has a *_with_preinstall
+   twin that keeps the QC pre-installation readings, so that rule can be run as an experiment (compare both on the same rows).
+1. Per-sensor CSVs are read for sensors inside the raster extent and put on a strict hourly index.
+2. Gaps up to 24 hours are linearly interpolated; longer gaps stay entirely empty. (pandas'
+   limit= would fill the first 24 hours of a long gap, so gaps are measured first and then masked.)
+3. Stations are split BY LOCATION into train / calibration / test (seeded). Every row, lag window
+   and patch of a station stays in one partition. Test stations are not touched until the end.
+4. Spatial lag: for every station and hour, the inverse-distance mean of its k = 5 nearest
+   TRAINING stations (never itself).
+5. Windows: for each (station, hour t) the sequence of the T lag hours, each step carrying
+   [PM2.5, spatial lag, sin(hour), cos(hour)] (F = 4), target = PM2.5 at t. A sample is dropped
+   if any lag hour is missing.
+6. Patches: one patch per station cut from the Master GeoTIFF (320 m / raster resolution, zero
+   padded at the edge). Stored once per station (patches.npy) and looked up per sample.
+7. Scalers are fit on the training partition only: target (and every PM2.5-derived column, which
+   share its scaler), and per-band for the raster patches (one patch per training station).
+8. The hourly PM2.5 matrix is also saved (pm25_hourly.npz) so cross-validation can recompute the
+   spatial lag per fold (section 6).
+
+
+4. TRAINING (Training.txt)
+--------------------------
+Architecture (networks/): a CNN encodes the patch into a 1D vector, an LSTM encodes the lag
+sequence into its last hidden state, the two are concatenated (late fusion) and a dense head
+produces the PM2.5 prediction. One loss; the gradient splits at the concatenation point and
+flows into both branches (checked by tests/test_gradient_bifurcation.py). Adam updates all
+weights end to end.
+
+Long runs (runtime_guard.py, train.yaml `runtime:`): an epoch on the 10 m data takes 19 min at batch 64, 5.8 min at 256 and 1.6 min
+at 1024 (554,785 rows, 4 threads), and used to print nothing until it ended. Now the first epoch prints its length and the projected
+total (a WARNING above warn_hours), then a progress line every 30 s. A loop that finishes no batch for stall_timeout_s (600 s; a
+batch takes 0.1-0.2 s) is declared hung: StageTimeout, exit code 124, the run's run_info.json gets status timed_out. A hang inside
+native code cannot be interrupted, so after hard_exit_grace_s (60 s) the process is ended with a traceback. max_hours (null) can
+cap a command; it is off because legitimate CPU runs take hours. Only missing progress counts as a failure, not slowness.
+The tune stage (fits run without per-epoch output) prints a plan up front, a line per finished fit and per trial (duration and an
+estimate of the time left in the search, plus once a projection for all searches), a 'still running' position line every
+status_every_s (300 s), and the same epoch lines as training for its evaluation fits on all rows.
+
+CNN feature map is a switch in configs/model.yaml:
+    spatial_cnn.feature_map: pool      (default) conv blocks -> average-pool to 1x1 -> linear layer
+    spatial_cnn.feature_map: flatten   conv blocks -> flatten the WHOLE map (channels x px x px)
+                                       -> linear layer (the literal reading of Training.txt).
+    "flatten" is much wider for production patches (128 x 32 x 32 = 131,072 inputs to the linear
+    layer), so it has far more parameters. Both are tested; both save into the checkpoint.
+
+`train` stage:
+  a) spatial k-fold CV over the training stations (data.yaml split.cv_folds). Each fold holds out
+     whole stations, recomputes the spatial lag from the fit stations (section 6) and trains with
+     early stopping. Fold metrics (in ug/m3) go into run_info.json.
+  b) final fit on ALL training stations for the mean best epoch of the folds (or the tuned epochs
+     with --tuned). Saved as checkpoints/<run_id>/best_dual_branch_model.pt.
+Early stopping means `epochs` (train.yaml) is only an upper limit: training stops once validation
+loss stops improving, so no more epochs are spent than needed.
+
+Speed (shared patches): a station's patch is the same for every hour, so a batch repeats the same few patches. The CNN
+processes each DISTINCT patch of a batch once and looks the result up per row; dropout is applied per row afterwards.
+Outputs and gradients equal the plain computation (tests/test_shared_patches.py). On the 10 m data, batch 256: about 2
+minutes per epoch over 300 thousand rows instead of 15 on a 4-thread CPU (7 instead of 15 at batch 64).
+
+
+5. HYPERPARAMETER TUNING (Training.txt) - python run_pipeline.py --stage tune
+------------------------------------------------------------------------------
+Searched (configs/tune.yaml -> space), in the three groups of the text:
+    global    learning rate, batch size
+    spatial   CNN kernel size (odd: 3, 5, 7), number of filters (first layer; deeper layers double)
+    temporal  LSTM state size, recurrent dropout (nn.LSTM dropout between stacked layers)
+Optional extra: cnn_feature_map (pool | flatten) - a commented line in tune.yaml.
+
+Method: Bayesian optimisation. A Gaussian-process surrogate (skopt.gp_minimize) learns a map from
+hyperparameters to validation loss; an acquisition function (EI) picks the next candidate;
+every result is fed back. The first n_initial_points are random.
+
+Objective: ONE number for the whole dual-branch network = the mean, over the inner folds, of the
+best validation loss measured after the dense head on held-out stations. CNN and LSTM
+hyperparameters are therefore tuned together.
+
+Epochs - switch in configs/tune.yaml:  search_epochs: false | true
+  false (default, cheapest): epochs are NOT searched. Every trial trains with early stopping (cap
+    tune.max_epochs, patience tune.patience), so a weak configuration is abandoned early and a
+    trial costs only the epochs it needs. Objective = best validation loss reached. The epoch where
+    it occurred is recorded; the winning trial's mean best epoch becomes the tuned "epochs" for the
+    final fit.
+  true: epochs is searched like any other hyperparameter (tune.epochs_space). Every trial trains
+    EXACTLY that many epochs with no early stopping, and the objective is the validation loss after
+    the last epoch, so a count that overfits is penalised. More expensive: each trial runs to its
+    full epoch count. (The two modes are not mixed on purpose: searching epochs while also
+    early-stopping would make the searched value meaningless.)
+
+Nested spatial cross-validation (inside the TRAINING stations only):
+    OUTER fold k : a group of stations held out as a test set
+        INNER folds : GroupKFold over the remaining stations -> drive the search
+        search      : n_calls trials, each trains inner_folds models
+        refit       : train on all outer-training stations with the winning hyperparameters
+        score       : on the outer test stations (RMSE / MAE / R2 in ug/m3) -> tune_info.json
+    FINAL search : the same search with inner folds over ALL training stations
+                   -> best_hyperparameters.json
+The outer scores estimate how well the whole tuning procedure generalises to unseen stations.
+Calibration and test stations are never used. For speed the search uses every tune.row_stride-th
+row (consecutive hours are near-duplicates); refits and evaluation use all rows.
+
+Cost: n_calls x inner_folds trainings per search, times (outer_folds + 1) searches. Reduce
+n_calls, row_stride, outer_folds, or set nested_evaluation: false for a cheaper run.
+
+Outputs in tuning/<id>/: best_hyperparameters.json, tune_info.json (config, outer folds with their
+stations, hyperparameters and scores), search_outer_<k>.json and search_final.json (every trial:
+hyperparameters, loss, per-fold losses, best epochs, seconds), convergence_final.png.
+
+
+6. SPATIAL LAG PER FOLD (why and how)
+-------------------------------------
+Problem: preprocessing computes the spatial lag with all training stations as neighbours. Inside
+cross-validation that leaks: the readings of a validation station are a FEATURE of the fit
+stations, so they reach the model during training, and the validation score is optimistic.
+
+Fix (training/fold_features.py + preprocessing/spatial_lag.py):
+  - For each fold the reference set is that fold's FIT stations only.
+  - The neighbour table is rebuilt for it and the lag recomputed for every hour with lag_matrix
+    on the saved hourly matrix (pm25_hourly.npz); the lag channel of X_temporal is replaced
+    (scaled with the same target scaler).
+  - A validation / outer-test station gets its lag from fit stations too, exactly as calibration
+    and test stations do in production.
+  - Rows whose lag is not computable (no neighbour reported at one of the lag hours) are dropped
+    from that fold.
+  - The final fit on all training stations, calibration and test keep the preprocessing lag
+    (reference = all training stations), which is what production uses.
+Checks: tests/test_fold_features.py shows that changing a held-out station's readings changes no
+lag when it is not in the reference set (and does when it is, i.e. the leak). On the pilot data
+the recomputed lag with the full training set as reference equals the saved channel to float32
+precision.
+
+
+7. GEOCP (Preprocessing.txt partitioning + Validation.txt)
+----------------------------------------------------------
+Calibration stations are never used to fit the model. After training, their absolute errors
+|y - yhat| (in ug/m3, after inverse-transforming the standardised target) are the nonconformity
+scores alpha_i, written to snapshots/<run>/data/calibration_table.csv with projected x, y so the same
+GeoCP code can serve any model (XGBoost or CNN-LSTM) without format conversion.
+For a query location, each score is weighted by a kernel of the planar distance (metres, projected
+CRS) between its station and the query, the weights are normalised to sum to one, and the
+(1 - alpha) quantile of that weighted distribution is the interval half-width, applied symmetrically
+around the point prediction. The lower end is then clipped at 0; coverage is checked on the
+UNCLIPPED interval, the published width is hi - clipped lo.
+  geocp.yaml finite_sample_correction: false (default, as in the text) | true (adds the query's own
+  weight at +infinity: the classical weighted-conformal correction, wider when calibration is small).
+  Each geocp run scores BOTH options by leave-one-station-out on the calibration stations
+  (geocp.json -> correction_comparison) so the choice never has to use the test stations.
+Kernel and bandwidth are chosen by leave-one-station-out on the calibration stations (a spatially
+held-out subset): the narrowest intervals whose coverage stays within coverage_tolerance of
+1 - alpha. Only then are the test stations scored. Bandwidth .inf is plain split conformal.
+Before calibration / test are predicted, check_compatibility() confirms the checkpoint's patch
+size, band count, lags, feature order and scalers (sha1) equal what is on disk.
+
+Test evaluation (Table 4.2), in data/geocp.json / metrics_summary.json:
+  empirical coverage, mean and median interval width, mean width-to-prediction ratio
+  (width / max(prediction, width_ratio_floor)), coverage in the urban core and in peripheral zones.
+  Zones follow the distance of each test station to its nearest calibration sensor: urban core =
+  within geocp.yaml zone_threshold_m, null = the median over the test stations.
+Cell centres (Section 4.5.2): the patch is centred on the raster cell that contains the sensor, and
+GeoCP measures distances between CELL CENTRES. preprocess stores cell_row / cell_col / cell_x / cell_y
+per station (stations.csv); the calibration table carries cell_id and x, y = cell-centre coordinates.
+
+Per-cell surface (Section 4.5.3-4.5.4): --stage surface --prediction-raster pm25.tif builds a 4-band
+GeoTIFF (prediction, lower, upper, width) on the same extent / resolution / CRS as the prediction raster.
+
+City-wide inference (--stage infer --timestamp "2025-07-01 12:00", configs/inference.yaml):
+  Section 4.5 says the point predictions and intervals are written to aligned rasters but not how a
+  cell WITHOUT a sensor gets its model inputs. The only description is the spatial-lag paragraph of
+  Preprocessing.txt: areas without a reading "rely on neighbouring cells' values". This stage applies it:
+    - patch: the raster patch centred on the cell (vectorised, identical to the training patches);
+    - PM2.5 history: at each lag hour the spatial lag of the cell's k nearest stations (inverse
+      distance, same k / weighting as training) fills BOTH the PM2.5 and the spatial-lag channels;
+    - hour encoding and scalers exactly as in training; the checkpoint compatibility check runs first.
+  lag_reference: train (default) uses the proper-training stations as neighbours, which is what the
+  model and the GeoCP calibration saw; all uses every station.
+  stride_px / window limit the grid: a 10 m raster of the whole NCR has ~10^7 cells.
+  Output: snapshots/<run>/surface/<timestamp>/prediction.tif and geocp_surface.tif.
+
+
+8. VALIDATION (Validation.txt)
+------------------------------
+Nested spatial cross-validation inside the proper training partition (sections 4 and 5) never reads
+the calibration or test stations, and its hold-out stations are distinct from both.
+
+Metrics: the three of the text - RMSE, MAE and R2 - are the headline numbers (report.yaml metrics).
+IA and Pearson r are still computed and listed under "supplementary" (report.yaml extra_metrics).
+Choosing between datasets: data.split.cv_assignment (balanced | by_station) decides which stations share a CV fold; balanced (GroupKFold)
+balances folds by rows, so the groups move with the data, by_station uses a seeded shuffle of the station ids and keeps them fixed. The runs of
+different datasets are compared on out-of-fold predictions only (never the test partition), on the station-hours all runs share and agree on,
+by `python -m reporting.compare_runs` (mean/sd over seeds, station-cluster bootstrap CI of the gap to the best, fold-agreement check).
+
+Reading the accuracy (reporting/accuracy.py, reporting/summary.py): `report` writes snapshots/<run>/SUMMARY.md, the page to
+read first, and prints a short headline. Next to the three metrics it gives bias (mean predicted - observed), the share of
+predictions within +/-5 and +/-10 ug/m3 and the share in the right AQI band (report.yaml accuracy; the band share is only
+meaningful against the score of always guessing the most common band, which is printed beside it), and two yardsticks on the
+same test rows: persistence (repeat the previous hour at that station; skill = 1 - MSE_model / MSE_persistence) and the
+average-level rule (R2 = 0). The cross-validation, calibration and test splits are shown side by side, the test stations
+one by one, and the automatic cautions list what not to over-trust (short run, few stations, under-covering intervals).
+The snapshot folder is split into plots/, tables/ and data/; snapshots from before that still load.
+When `train` ends it prints the cross-validation accuracy per fold (RMSE, MAE, R2, mean +/- sd).
+
+R2 reading: with model.spatial_cnn.enabled=false a TEMPORAL-ONLY baseline is trained (no CNN branch);
+python run_pipeline.py --stage report --run-id <full run> --baseline <temporal-only run> adds
+r2_gain (and RMSE / MAE change) on the same test rows. Note the spatial lag still feeds the LSTM in
+both runs; switch it off with --override data.spatial_lag.enabled=false (and re-run preprocess) for
+a strictly "no spatial information" baseline.
+
+Spatial bias (--stage bias, reporting/spatial_bias.py), residual = actual - predicted:
+  1. out-of-fold predictions of the spatial CV (checkpoints/<run>/oof_predictions.csv), training
+     stations only - an assertion refuses any calibration / test station;
+  2. mean residual per geographic grid cell (report.yaml bias.cell_size_m, null = raster pixel);
+  3. KNN spatial weights (bias.knn_k = 4), row-standardised;
+  4. Global Moran's I, 999 permutations, two-sided pseudo p-value;
+  5. only if significant: Anselin's Local Moran's I -> LISA clusters. High-High = hotspots of
+     systematic UNDER-prediction (actual > predicted), Low-Low = coldspots of OVER-prediction;
+     High-Low / Low-High are spatial outliers; the rest "Not significant";
+  6. clusters are overlaid on every band of the Master GeoTIFF (lisa_on_bands.png) and a per-cluster
+     band profile (std units from the all-cell mean) is written to spatial_bias.json, to see which
+     morphology the model keeps missing.
+Outputs: data/spatial_bias.json, data/residuals_by_cell.csv, plots/lisa_map.png, plots/lisa_on_bands.png.
+With few training stations (28 here; fewer cells after aggregation) Moran's I has little power; bias.min_cells guards it.
+
+Order of access: nested CV / tuning (training stations) -> final fit (training stations) ->
+calibration predictions + GeoCP configuration -> test predictions, intervals, Table 4.2 metrics.
+
+
+9. OUTPUT: SPATIOTEMPORAL SURFACES, MAPS, EXPLAINABILITY (Output.txt)
+---------------------------------------------------------------------
+Inputs. Output.txt names seven input features: mean building height, aspect ratio, sigma_H, building
+density, street width, NDVI and the cyclical time encoding. The Master GeoTIFF carries the first six as
+bands (data.yaml raster.band_order: height, ndvi, building_density, street_width, aspect_ratio,
+height_std); sigma_H is new: Output.txt names it without a definition, the XGBoost side defines it as
+bh_stdev, the standard deviation of building height over each 500 m grid cell (Section 3.1.1 of the paper
+per its README, not seen here). For the 10 m raster it is the same quantity as a moving window:
+raster.height_std_neighborhood_m = 500 m around each pixel, so the band stays continuous. The time
+encoding (sin, cos of the hour) is an input of the LSTM branch, injected per snapshot, not a raster channel. The current
+raster v2 was built outside this pipeline and already has 5 bands including sigma_H (building_height_stddev) and
+street_aspect_ratio_mean, but no street-width band; the rasters stage would build a different band set.
+The morphology is static: patches are cut from the same raster for every snapshot.
+
+CRS. One CRS runs through the whole pipeline: WGS 84 / UTM zone 51N (EPSG:32651), chosen with the team. Sensor
+positions are projected into it, the Master GeoTIFF is built in it (--stage rasters), patches and every KNN /
+GeoCP distance are planar metres in it, and the rasters and maps infer writes inherit the raster's CRS, so input
+and output always agree. (Output.txt names PRS92; the project does not use it.) Safeguards: data.crs must be
+projected in metres (a geographic CRS in degrees is refused); check_raster_crs() stops preprocess and inference
+when the raster is in another CRS; a checkpoint refuses data prepared in another CRS.
+
+Snapshots. --stage infer --date 2025-07-01 predicts the hours of inference.snapshot_hours (all 24 by
+default; [8, 12, 17, 21] = morning peak, midday, afternoon peak, night); --timestamp gives explicit hours. For every
+raster cell (patches overlap; stride_px 1) the CNN-LSTM predicts the centre cell of its patch. Cells
+without a sensor use the spatial-lag stand-in (section 7).
+Per date, in snapshots/<run>/surface/<YYYYMMDD>/:
+  prediction_volume.tif, lower_volume.tif, upper_volume.tif, width_volume.tif   one band per snapshot
+  prediction_daily_mean.tif     24-hour mean of the snapshots (a cell missing in any snapshot stays empty)
+  maps/aqi_HHMM.png, daily_panels.png, daily_mean.png                       AQI bands
+  maps/continuous_HHMM.png, continuous_panels.png, continuous_daily_mean.png  continuous (viridis) scale
+  Both styles are clipped to the NCR (data.paths.boundary = the 17 city polygons from GADM 4.1, built by preprocessing/boundaries.py), with city
+  names, scale bar, north arrow, km axes, a legend with ranges and 'No data', titles 'HH:MM (N cells, coverage C)', notes and a caption
+  (output.yaml maps:). Display only: the GeoTIFFs keep every cell. Without the boundary file the maps are unclipped, with a warning.
+  output_summary.json           level, share of cells above 35 ug/m3, AQI category shares, interval width;
+                                daily mean: cells above 50
+Maps: gradient on the Philippine AQI scale (configs/output.yaml aqi.bins). The PNGs draw a coarse grid smoothly: the values are
+interpolated (bicubic spline, clipped to the data range, after a gentle Gaussian blur of smooth_sigma_cells = 0.8 source cells) onto a
+finer grid BEFORE the AQI colours are assigned, so band edges are curves, not staircases of squares (smooth_maps, smooth_target_px).
+Display only: the GeoTIFFs and output_summary.json keep the raw per-cell values. No outline is drawn between the bands (the adviser
+found it unnecessary); output.outline_above_threshold: true brings back the black line around cells above
+highlight_threshold (35 ug/m3) and, on the daily mean, above daily_guideline (50 ug/m3). Both thresholds still feed the counts
+in output_summary.json.
+Basemap (output.yaml basemap, four independent switches: enabled, web_tiles, vector_layers, strict). With
+everything on (the default) it is a fallback chain, so a run works online and offline with no change:
+1) web tiles via contextily (only a picture behind the raster, coordinates always come from the raster
+georeference; no Google Maps API). CARTO's raster basemaps need a FREE API key (carto.com/basemaps/apikey):
+put it in model/.env as CARTO_API_KEY (git-ignored; .env.example is the template). Without a key CARTO serves
+watermarked tiles, so none are requested; the key is read from the environment only and is replaced by *** in
+messages. The key is sent as ?key=<key>, as the xyzservices CartoDB.* providers define it. Other providers
+(e.g. OpenStreetMap.Mapnik) need none if the library is installed AND the tile host
+answers a 2-second connection test; 2) else the OFFLINE vector layers (OSM streets + study-area boundary from
+data.paths.streets / boundary, reprojected to data.crs and clipped to the map); 3) else a plain background.
+Each step is skipped quietly when unavailable. After tiles fail once (offline, blocked) the rest of the run does
+not retry them, so a run is not slowed by network timeouts. Tiles are cached in basemap_cache_dir (.tile_cache),
+so tiles fetched once online can be reused offline later. output_summary.json records what was used
+("basemap": web | vectors | none, plus the switches used).
+Switches: enabled=false -> plain background everywhere; web_tiles=false -> the network is never touched
+(offline machine); vector_layers=false -> no offline layers; strict=true -> an enabled source that is
+unavailable (library missing, server unreachable, layers missing) stops the run instead of falling back.
+Per run: --override output.basemap.web_tiles=false. The old single-string setting (auto | contextily | vectors |
+none) is still accepted. The basemap is only in the PNG maps, not in the GeoTIFF volumes.
+No GeoCP interval is defined for the daily mean: the intervals belong to single snapshots.
+AQI breakpoints: confirmed Good 0-25, Fair 25.1-35, Unhealthy for sensitive groups 35.1-45; Very
+unhealthy 45.1-55 is from ONE secondary source; the tiers above 55 are not verified - check DAO 2020-14
+and edit aqi.bins.
+
+Explainability (--stage explain --timestamp "2025-07-01 12:00", after infer for that date).
+Grad-CAM on the LAST convolutional layer of the CNN branch: channel weights = mean gradient of the scalar
+prediction, map = ReLU(weighted sum of the activations), rescaled to [0, 1] per patch (convolution
+padding keeps it the size of the patch, so it overlays the input). It is the gradient of the full
+prediction, so it shows what in this patch mattered given the temporal history. For the highest- and
+lowest-predicted cells (output.yaml explain.top_n / bottom_n, ranked inside the NCR and at least explain.min_separation_m apart) it writes
+gradcam_hot_cells.png and gradcam_cold_cells.png (every morphology band with the attended region outlined), gradcam_map.png (where those cells
+are, numbered, on the predicted map), gradcam_band_profile.png (hot against cold, per band), morphology_sheet.png (the five bands mapped
+over the NCR), gradcam_attention.csv
+and gradcam_summary.json (plus the SHAP-style gradcam_band_swarm.png / gradcam_band_importance.png / gradcam_band_swarm.csv over a sample of NCR cells: one dot per cell, one row per band, x = attention score, colour = the band's patch mean) (and, for the high and the low end of every band over the NCR, the feature_groups/ folder: groups set by
+the raster percentiles, hot and cold picked by prediction inside each group; an association, not a what-if): for each band, how many patch standard deviations higher the attended pixels
+are than the rest of the patch (explain.attention_quantile = top 20 %). Positive values for building
+density, aspect ratio, height or street width point at dense blocks, canyons and arterials; the overlays
+are still to be inspected by eye, as the text says. SHAP belongs to the XGBoost branch and is not here.
+A saliency map needs a patch of at least 3 x 3 pixels (the 10 m raster gives 32 x 32); with a coarse raster the
+stage reports that and skips. Checked on real 32 x 32 patches.
+
+
+10. TRACKING EVERY RUN
+---------------------
+hyperparameters do NOT adjust themselves during train; whatever the YAMLs plus --override say is
+used. checkpoints/<run_id>/run_info.json records them (also copied to snapshots/<run_id>/):
+hyperparameters, derived shapes (T, F, C, patch size), parameter counts per branch, the full layer
+listing, git commit, partition sizes, per-fold CV results, final epochs and where they came from,
+tuned_from, test and calibration metrics, chosen GeoCP configuration.
+checkpoints/runs_index.csv has one row per run. The checkpoint stores the model config, so
+training.checkpoint.load_model(path) rebuilds the network without guessing.
+
+
+11. KNOWN LIMITS (state these in the thesis)
+-------------------------------------------
+- The Quezon City sensors stop on 2025-12-31 and the spatial lag takes a cell's five nearest TRAINING stations whether or not they report:
+  in 2026 the cells (and the OpenAQ station 6340868, test partition, which reports only from 2026-05) whose five nearest are all QC sensors get
+  no lag, so no prediction (88.3 % of cells on 2026-04-11, 100 % on 2025-07-01) and no model rows (the test set is effectively 16 stations).
+  For maps and Grad-CAM, inference.openaq_only_from_year (default 2026) makes every hour of that year or later take its stand-in history from
+  the nearest OpenAQ training stations only, so every cell is predicted (null switches it off). The stations are farther away and the model never
+  saw a history made of one network. It does not change training or the test rows; fixing those would need the lag to come from the nearest
+  stations that report that hour (a method change, not made). SUMMARY.md section 5 gives the test accuracy per year.
+- The split is spatial only: every partition covers the same hours, so a regional weather episode
+  appears in train and test. Scores measure generalisation to NEW LOCATIONS, not forecasting.
+- Fold-wise spatial lag changes the neighbour distances (fewer reference stations in a fold), so a
+  held-out station's lag is slightly less informative inside a fold than in production.
+- The Master GeoTIFF stops at 14.398 N: the southern tip of the NCR (Tunasan station, 2.3 km south of it) is not
+  covered. The raster is a rectangle with data everywhere, so maps also show Manila Bay and the neighbouring provinces.
+- Full-resolution inference (10.6 million cells) takes about 4-10 hours per snapshot on a 4-thread CPU (300-800
+  cells/s); use inference.stride_px (odd) or inference.window to look first. The CNN part does not depend on the hour:
+  predict_surface takes all hours of a date, and each chunk computes neighbours, patches and the CNN embedding once and
+  reuses them for every hour (3.4x faster for four hours on a real-raster window, identical output; reuse_embeddings=False
+  is the per-hour reference). chunk_cells 1024 keeps the CNN at ~1.2 GB (4096 needed ~5.1 GB). PyTorch is the CPU build.
+- With few calibration stations GeoCP coverage can fall below the target on test stations.
+- The rasters stage was tested on synthetic data only, not on the real building / street /
+  height / NDVI files.
+- Smoke runs used 1-4 epochs and tiny search budgets: they check the wiring, not the results.
+- City-wide inference is an interpretation: Section 4.5 does not spell out the model inputs of a cell
+  without a sensor; the spatial-lag stand-in follows the Preprocessing.txt paragraph. The model was
+  trained on sensors whose own lags are real readings (smoother stand-ins are a distribution shift) and
+  the GeoCP calibration scores also come from real histories, so intervals on stand-in cells may be too
+  narrow. A stricter alternative is to compute the calibration predictions with the same stand-in.
+- Inference at 10 m over the whole NCR is very heavy on a CPU; use stride_px / window to look first.
+- Output.txt compares the daily mean with coarser interpolations from prior local studies; that needs
+  external data and is not built.
+- The AQI tiers above 55 ug/m3 are not verified (section 9).
+- Moran's I on out-of-fold residuals describes the CV stations only, not the whole city.
+
+
+12. HOW IT WAS CHECKED
+----------------------
+pytest tests  -> config, seed, shapes, gradient flow to both branches (pool and flatten),
+trainer, checkpoint round trip, metrics (hand-computed), gap capping, patch/window alignment by
+hand, partitioning, spatial lag (hand-computed, leakage), per-fold lag, scalers, GeoCP,
+tuning (search, nested folds, epoch switch), run records, GeoCP (normalised vs corrected,
+clipping, Table 4.2 metrics, zones, grid vs exact quantiles, surface rasters), Moran's I / LISA
+(sign convention, significance), temporal-only baseline, checkpoint compatibility.
+End-to-end runs on the data folder (2-epoch smoke runs): preprocess -> train -> geocp -> bias -> report -> infer
+(coarse stride) -> explain. Earlier, on the 500 m pilot data: preprocess -> tune -> train --tuned -> geocp -> bias -> report,
+plus a temporal-only run compared with --baseline.
+
+
+13. FOUR MODELS ON KAGGLE, GEOCP OFF, RESUMING (training_cells.ipynb)
+----------------------------------------------------------------------
+The notebook at the repository root trains four models of one dataset and compares them:
+    cnn_nogeocp    CNN branch yes, GeoCP no   (67 training stations, no calibration set)
+    nocnn_nogeocp  CNN branch no (LSTM only), GeoCP no
+    cnn_geocp      CNN branch yes, GeoCP yes  (54 training + 13 calibration stations)
+    nocnn_geocp    CNN branch no, GeoCP yes
+A row says what the morphology adds, a column what holding the calibration stations out costs. RUN_VARIANTS (cell 1) sets the order, MAPS_FOR which
+models also get maps and Grad-CAM (default cnn_nogeocp). Each model keeps checkpoints_<name>/ and snapshots_<name>/ under runs/<dataset>/; preprocessing
+is shared by the two models with the same GeoCP setting (processed_geocp/, processed_nogeocp/). A GeoCP run left by the older notebook
+(runs/<dataset>/{processed,checkpoints,snapshots}) is reused as cnn_geocp. Cell 5 writes model_comparison.csv.
+
+geocp.enabled (configs/geocp.yaml, default true). False means no GeoCP in `all`, `report` and `infer`:
+  - partition_locations picks NO calibration stations: the development stations that would have been calibration ones train the model; the test
+    stations are chosen first and stay the same, so the two settings are scored on the same stations (the rows differ a little: 287 k with GeoCP, 295 k
+    without, because a larger training set leaves fewer windows without a usable lag);
+  - the geocp stage inside `all` only predicts the test stations (predictions_test.csv, a geocp.json that says enabled false); no calibration table;
+  - infer writes prediction_volume.tif (and the daily mean) but no lower / upper / width volumes; the maps never used them;
+  - report leaves out the calibration rows, the GeoCP section and the coverage plot, and SUMMARY.md says GeoCP was not run;
+  - `--stage geocp` and `--stage surface` still run GeoCP when called directly (_geocp_forced).
+A test makes every GeoCP function raise and checks that the stage still completes.
+
+The 12-hour limit. TIME_BUDGET_H (default 11): every stage is started with train.runtime.max_hours = the time left; a stage that runs out stops cleanly
+(exit code 124) and the notebook prints where it stopped. Training saves each finished cross-validation fold (fold_<k>_result.json, fold_<k>_oof.csv).
+train.resume: true (set by the notebook) continues the newest run that was stopped (status running or timed_out, no final model) from its first
+unfinished fold; the fold that was running starts again. To continue: Save Version, then Add Input -> this notebook's output (and the data), run all;
+finished steps are skipped. A finished run counts as stale and is retrained when model or training settings in configs/*.yaml changed
+(RETRAIN_IF_CONFIG_CHANGED), so do not change them while a run is half done. The code on Kaggle comes from GitHub (or a saved repository); push first,
+and set REFRESH_CODE = True for one run when a saved repository holds older code.
+
+
+14. GRAD-CAM OVER THE SNAPSHOT HOURS (--stage explain --date D)
+----------------------------------------------------------------
+--stage explain --date 2025-07-23 explains every snapshot hour (explain/20250723_0800 ... _2100) and, with output.explain.aggregate (default true), pools them
+into explain/20250723_all/ (explain_day, explain_aggregate in run_pipeline.py; explain/aggregate.py):
+  - gradcam_band_profile, gradcam_attention.csv   hot against cold cells of every hour, pooled
+  - gradcam_band_swarm / gradcam_band_importance / .csv   the SHAP-style swarm and bars over the sampled NCR cells of all hours (cell-hours)
+  - band_ablation / band_ablation_swarm / .csv   the impact counterpart (swap a band, see the prediction move), pooled
+  - gradcam_band_by_hour .png/.csv   mean |attention| per band for each hour and for all hours (are the hours alike?)
+  - gradcam_hot_cells, gradcam_cold_cells, gradcam_*_row, gradcam_map   the hot and cold cells of the AVERAGE of the day's snapshots
+    (prediction_daily_mean.tif) with the Grad-CAM AVERAGED over the hours (the same cell, one Grad-CAM per hour, then the mean)
+The pooled figures read the tables the hours already wrote, nothing is recomputed. A finished hour is reused (output.explain.redo true redoes it);
+aggregate false gives the hours only. --timestamp (repeatable) explains single hours the same way.
+
+
+15. RESULTS OF THE FOUR-MODEL COMPARISON (runs of 4 November 2026)
+-------------------------------------------------------------------
+Dataset from_2023_with_preinstall, raster master_raster_v3, tuned hyperparameters, seed 42, 3 spatial CV folds, 16 test stations with readings.
+    model                 CV R2   test R2   test RMSE   test MAE   parameters
+    CNN-LSTM, no GeoCP    0.708   0.721     5.42        3.39       1,058,929
+    LSTM-only, no GeoCP   0.715   0.724     5.39        3.36         169,073
+    CNN-LSTM, GeoCP       0.692   0.707     5.50        3.44       1,058,929
+    LSTM-only, GeoCP      0.699   0.718     5.39        3.38         169,073
+- The CNN branch does not improve accuracy. Paired over the test stations (bootstrap of 2,000 resamples): without GeoCP the gap (CNN-LSTM minus LSTM-only) is
+  -0.003, 95 % range -0.008 to +0.002 (no difference; CNN better at 8 of 16 stations); with GeoCP -0.011, range -0.016 to -0.008 (CNN-LSTM worse; better at 1
+  of 16). Errors correlate at 0.97-0.98; a 50/50 average gives R2 0.726. Cross-validation agrees.
+- Most of the skill is the previous hour: repeating it gives R2 0.646, the LSTM adds 0.078, the CNN branch -0.003 on top. Skill of the LSTM-only against
+  the previous hour 0.22.
+- Peaks dominate the error: the 9 % of hours above 30 ug/m3 give 51 % of the squared error, the 1.3 % above 50 give 29 %. The CNN is a little better below 30
+  and a little worse above, so the two cancel.
+- Training: best validation epoch after 1-10 epochs for the CNN-LSTM (final fits 7 and 3), 4-19 for the LSTM-only (final fits 15 and 9). 885,760 of the
+  CNN-LSTM's parameters are in the CNN, fitted on one 320 m patch per station, 54-67 distinct images. Overfitting to those patches is the likely reading;
+  the runs show early stopping and parameter counts, not the mechanism.
+- Grad-CAM and band ablation (cnn_nogeocp, 3 dates x 4 hours): attention ranks NDVI first on every date and in every hour, the hours look alike; swapping a band
+  moves the prediction most for the building-height bands (0.4-1.2 ug/m3 on average, against a test RMSE of 5.4). Attention and impact disagree and the impact
+  buys no accuracy. Both are model sensitivities, not causal effects.
+- 13 more training stations (GeoCP off): test R2 0.707 -> 0.721 for the CNN-LSTM (+0.014), 0.718 -> 0.724 for the LSTM-only (+0.006). One split, and the test
+  rows differ slightly, so a hint, not a result.
+- No spatial clustering is left in the residuals (global Moran's I not significant in all four runs).
+
+
+16. LEARNING CURVE (learning_curve.ipynb) AND WHAT A "DRAW" IS
+----------------------------------------------------------------
+Question: does the CNN branch pay off as the number of training stations grows? Both models are trained on 20, 40, 54 and all 67 training stations (SIZES) and
+scored on the SAME test stations. data.split.train_subset {n_stations, seed} keeps the first n stations of a seeded shuffle of the training stations, so the
+subsets of one seed are nested (20 in 40 in 54); the other stations are in no partition (not trained on, not lag neighbours, not tested on). GeoCP is off. By
+default there is no cross-validation and the epochs are fixed per model (EPOCHS: 7 CNN-LSTM, 15 LSTM-only, what cross-validation chose on the full data), so a
+point costs one fit; USE_CV = True restores cross-validation (about 4 times the time). Same time budget and resume as section 13. Outputs: learning_curve.csv,
+learning_curve_gap.csv, learning_curve.png. Fewer stations also thin the spatial lag (it comes from the training stations), for both models.
+
+A DRAW is one random subset of the training stations: a replicate of the station sample. At 20 stations it matters which 20 are picked, so one subset mixes
+"fewer stations" with "lucky or unlucky stations". With DRAWS replicates per size:
+  - each dot is a draw, the width of the dots at a size is the station-sampling variability, the line is the mean over draws;
+  - both models of a draw see the same stations, so the PAIRED GAP (CNN-LSTM minus LSTM-only) cancels station luck: the gap is what the decision rests on;
+  - the test stations are fixed: the curve describes these 16 test stations; test-set uncertainty is a separate matter (bootstrap over test stations);
+  - draws overlap more at large sizes (two draws of 54 from 67 share at least 41 stations), so the spread there understates the variability, and the full-size
+    point has no subset variability (add training seeds if needed);
+  - three draws is a minimum; with n = 3 report min and max, not a standard deviation.
+Write the rule down before the run, e.g.: the CNN branch benefits from more stations if the mean gap rises across sizes and the gap at the largest size lies
+above the draw-to-draw spread of the gap at the smallest.
+Thesis wording: "We repeated each training-set size over R random station subsets, nested within a draw, and trained both models on the same subset. The accuracy
+of a size is the mean over draws, the CNN effect is the paired difference between models within a draw, and the spread across draws shows how much of the curve
+is due to which stations were sampled. The 16 test stations are the same at every point."
+
+
+17. TRANSFER-LEARNING PLAN, AND WHETHER STEP 1 IS REDUNDANT
+------------------------------------------------------------
+Why: the CNN has six times the parameters and gains nothing, so capacity is not the limit. A vision transformer or a deeper or pretrained backbone has more
+capacity for the same 54-67 distinct patches (and ImageNet features do not fit 5-band 32 x 32 morphology): run it as an ablation and report it even if it
+loses. Data is the lever: other Southeast Asian cities add distinct stations and conditions; the risks are other sensors, sources and climate, and that each
+city needs the same five morphology bands built first. The temporal side needs no rasters to transfer. The model sees only PM2.5 history; weather inputs and
+forecasting ahead in time are out of scope (group decision, November 2026).
+Steps, by cost against information:
+  1. learning curve on Manila stations (learning_curve.ipynb)            hours, no new data   whether more stations make the CNN pay off; whether the
+                                                                                              LSTM-only gains from more stations
+  2. pretrain the LSTM on other cities' hourly PM2.5, fine-tune on Manila  no rasters          whether the temporal part transfers
+  3. pretrain the CNN-LSTM on other SE Asian cities, fine-tune on Manila   morphology bands per city: weeks   the adviser's main idea
+Is step 1 redundant? Partly.
+  - It gates only step 3. Step 2 does not depend on it: run it regardless. It decides whether weeks of raster building are worth it.
+  - It is cheap and gives two curves: the gap answers the morphological question, the LSTM-only curve alone answers the temporal one (if it keeps rising with
+    stations, more stations or cities should help step 2; if flat, expect little).
+  - A flat or negative gap is a strong reason not to build step 3; a positive trend is a reason to. Either is a thesis result and answers "why transfer?".
+  - Its limits: a trend over 20-67 stations is an extrapolation to hundreds and cannot test domain shift. A positive result is necessary, not sufficient.
+  - It is redundant only if step 3 will be done whatever step 1 says, because step 3 contains its own comparison with and without morphology. Then run it as
+    context, with fewer draws (e.g. sizes 20, 40 and all, 2 draws).
+
+RESULT OF STEP 1 (run locally 10-12 November 2026, outputs in Outputs/learning_curve/)
+Both models on 20, 40, 54 and all 67 training stations (train_subset seed 0, one draw per size, nested), GeoCP off, no cross-validation, fixed epochs
+(CNN-LSTM 7, LSTM-only 15), scored on the same 16 test stations (about 295 k rows). CNN-LSTM fits took about 1-6 h each, LSTM-only fits 3-6 min.
+    stations   CNN-LSTM R2   LSTM-only R2   gap       CNN-LSTM RMSE   LSTM-only RMSE
+       20       0.7089        0.7164       -0.0075       5.530           5.458
+       40       0.7123        0.7180       -0.0058       5.501           5.446
+       54       0.7106        0.7239       -0.0133       5.515           5.387
+       67       0.7173        0.7240       -0.0067       5.451           5.386
+  - The CNN branch does not pay off as stations grow: the gap is negative at every size (-0.006 to -0.013) and does not rise, so the rule of section 16
+    (mean gap rises across sizes) is not met. This agrees with section 15 (gap -0.003 without GeoCP).
+  - Both models gain about the same from more stations (+0.008 R2 from 20 to 67), so more Manila stations do not close the gap; the LSTM-only stays ahead.
+  - The curves are nearly flat next to the previous-hour baseline (0.646) and the LSTM's gain over it (+0.078). The 67-station points reproduce the earlier
+    full-data runs (CNN-LSTM 0.717 against 0.721, LSTM-only 0.724 against 0.724).
+  - Limits: one draw per size, so station-sampling variability is not measured (differences of about 0.005 are within what another draw could change); fixed
+    test stations; 20-67 stations says little about hundreds. Consistent evidence, not proof of no effect.
+  - Consequence: step 3 (morphological transfer) is the weakest bet. Step 2 does not depend on this result.
+
+IS TRANSFER LEARNING ON THE TEMPORAL SIDE ALONE ENOUGH?
+Yes, as the main transfer-learning contribution, on the evidence so far, with three conditions.
+  - The accuracy is temporal: previous hour 0.646, LSTM +0.078, CNN branch -0.003 to -0.011 (section 15) and negative at every size (above). Transfer should go
+    where the skill is. It needs only other cities' hourly PM2.5, no morphology rasters (weeks per city), and the LSTM-only model (169 k parameters) trains in minutes.
+  - Condition 1, expect a modest gain: the LSTM-only curve rises only +0.008 from 20 to 67 stations. A gain from other cities comes from new conditions (sources,
+    seasons, extremes), not from the count; peaks above 30 ug/m3 give 51 % of the squared error, which is where other cities could help.
+  - Condition 2, compare against the right baselines on the same 16 test stations: Manila-only LSTM (0.724), pretrained then fine-tuned, pretrained without
+    fine-tuning (zero-shot), and the previous hour. Report negative transfer if it occurs (other sensors, sources, climate).
+  - Condition 3, keep the story consistent: "morphology bands did not add accuracy over the temporal model at 20-67 stations; the accuracy is temporal; transfer
+    targets the temporal side". The CNN-LSTM, Grad-CAM and band ablation stay as the analysis of what the morphology branch learned, not the accuracy claim.
+    If the adviser wants the morphological transfer, step 3 stays possible, but this evidence does not support its cost.
+
+MANUSCRIPT SECTIONS TO ADD (full table with search keywords: README 8.7)
+Chapter 2 (RRL): 2.3.3 morphology against temporal drivers; 2.4.5 data quantity, learning curves and model capacity; 2.4.6 transfer learning in air-quality
+  modelling; 2.4.7 benchmarks and significance testing; 2.4.8 explainable deep learning for environmental maps; 2.5 synthesis extended with the gap.
+Chapter 3: 3.3.4 transfer learning; 3.4.4 baselines, skill scores and paired comparison; 3.4.5 learning curves and branch ablation; 3.6 model interpretability.
+Chapter 4: 4.1.4 source-domain data acquisition; 4.2.6 harmonisation and source-station selection; 4.3.4 transfer-learning procedure; 4.3.5 CNN-branch ablation (four
+  models); 4.4.4 baselines and paired comparison; 4.4.5 LEARNING-CURVE EXPERIMENT; 4.4.6 morphology diagnostic (no PM2.5 lags); 4.4.7 transfer-learning evaluation;
+  4.6.2 24-hour snapshots; 4.6.4 band ablation and Grad-CAM pooled over hours; 4.6.5 day animation.
+Wording rule: the learning curve and the four-model comparison show that the CNN branch added no accuracy at 20-67 training stations, not that morphology has no effect on PM2.5.
+Tests in this work that need literature in chapter 2: learning curve, persistence baseline and skill score, paired bootstrap, CNN validation inflation, Grad-CAM against
+perturbation, the ablation design.
+
+
+18. THE DATASET REPORT (--stage dataset, reporting/dataset_report.py)
+----------------------------------------------------------------------
+Writes dataset_report/ next to the processed folder (DATASET_REPORT.md, dataset_sensors.csv, dataset_rows.csv, dataset_yearly.csv, dataset_pm25_distribution.csv,
+dataset_morphology_summary.csv, dataset_morphology_stations.csv, fig_availability.png, fig_pm25_distribution.png, fig_morphology.png). Nothing is trained.
+It re-reads the raw sensor files with the cleaning of preprocessing/clean_loader.py (range limits, hourly mean, interpolation of gaps up to time.max_gap_hours) and reads the
+processed folder for the partitions and the model rows, so the counts describe the data the model was built from.
+  - sensors: every sensor of the locations table, inside the raster or not, network (OpenAQ or QC from the file name), partition, readings, first and last hour;
+  - rows: readings in the files -> usable -> hours with a reading -> hours filled by interpolation -> hours left missing -> model rows, and the hours that have no model row
+    (next to an outage, or no spatial lag); sensors with readings but no model rows are named (here OpenAQ 6340868, a test sensor that reports only from 2026-05);
+  - missingness and temporal availability: per sensor and per year, sensors reporting per network, station-hours, sensors reporting at the same hour, a sensor x month heatmap;
+  - PM2.5: percentiles and exceedance shares per network;
+  - morphology: the five bands over the NCR (10 m pixels every 5th, and 320 m patch means = the scale the CNN sees) and at the sensors' own patches; how much of the NCR's range
+    the sensors span. NoData counts as 0 as in the model's patches, and a 0 is a pixel with no building, common at 10 m.
+Numbers on the four-model data: 84 sensors inside the raster (44 OpenAQ from 2024-08, 40 QC to 2025-12-31), 1,209,191 usable readings, 1,347,485 hours with a value once short
+gaps are filled, 1,313,683 model rows; median share of the active span with no reading 0.3 % (QC) and 31 % (OpenAQ); the sensors span 73-91 % of the NCR patches' 5th-95th percentile
+range of each band and 92-98 % of the full range.
+
+
+
+19. A WHOLE DAY OF MAPS, ANIMATION AND SLIDESHOW
+------------------------------------------------
+--stage infer --date D predicts all 24 hours by default (inference.snapshot_hours; [8, 12, 17, 21] = the old four hours, six times faster). One band per hour in
+prediction_volume.tif, a true 24-hour mean in prediction_daily_mean.tif, and in maps/ for each style: <style>_panels.png (24 hours, 4 rows x 6 columns on one colour
+scale; up to 6 hours keep the 2-column layout), <style>_animation.gif (looping, one frame per hour, output.animation.fps 2), <style>_animation.mp4 (only with
+imageio + imageio-ffmpeg installed, else a notice), <style>_slideshow.html (play / pause + slider). The animation re-assembles the hourly PNGs render_day already
+drew (output/animation.py): no extra prediction. The daily-mean title says "24-hour mean" only when 24 snapshots are behind it ("Mean of N snapshots" otherwise).
+Grad-CAM explains inference.explain_hours (default [] = every snapshot hour, so all 24 and their aggregate; [8, 12, 17, 21] = the four peak hours, six times faster; each hour is slow); they must be among the day's infer hours. The pooled
+hot and cold cells use the mean of exactly the explained hours (read from prediction_volume.tif), so a cell's mean prediction and its averaged Grad-CAM describe the same hours.
+XGBoost: the same default (XGB_SNAPSHOT_HOURS=8,12,17,21 for the old set), a 4 x 6 panel, animation_<day>.gif and slideshow_<day>.html on one shared scale
+(xgboost/maps/animation.py). The 10 m grid (infer10) stays at four hours: one 10 m snapshot is ~10.6 million cells.
+
+
+20. THE NO-PM2.5-HISTORY DIAGNOSTIC (data.temporal.use_pm25_lags: false)
+------------------------------------------------------------------------
+The learning curve and the four models show that the CNN branch adds nothing ON TOP of the PM2.5 lags and the spatial lag; they cannot say whether morphology carries signal at
+all or is redundant with the lags. use_pm25_lags: false removes the PM2.5 lags and the spatial lag, so the temporal branch sees only the hour of day (F = 2: sin_hour, cos_hour)
+and the morphology is the only thing that tells stations apart. Train the CNN-LSTM and the LSTM-only model like this and compare their test R2:
+  - CNN-LSTM clearly above LSTM-only: the morphology carries signal on its own and is redundant once the lags are in;
+  - about equal: the morphology carries little signal even with no other information (other cities' rasters are not worth the weeks).
+training_cells.ipynb: add "cnn_nolags", "nocnn_nolags" to RUN_VARIANTS (GeoCP off, no maps, shared processed_nolags/). No lag means every hour with a reading is a row (about 1.35
+million rows at 20 stations against 295 thousand test rows with lags): compare the two diagnostic models with each other, not row for row with the lag models, and expect low
+accuracy by design; the gap is the result. Checked on real data (preprocess with 20 stations: X_temporal [1,347,233, 3, 2]; a one-epoch LSTM-only fit).
+
+
+21. TRANSFER LEARNING OF THE TEMPORAL SIDE (other cities -> Manila); WEATHER AND FORECASTING ARE OUT OF SCOPE
+--------------------------------------------------------------------------------------------------------------
+Scope: the group decided (November 2026) not to include weather inputs or forecasting ahead in time, so only PM2.5 history is transferred.
+1. Data: other-country-scrapers/scrapers.ipynb, one site, the OpenAQ API v3 (/locations, /sensors/{id}/hours), key in OPENAQ_API_KEY (free; 60 requests a minute, 2,000 an hour,
+   the client stays under both, resumes, DRY_RUN estimates the cost first). Cities: Ho Chi Minh City, Hanoi, Bangkok, Jakarta, Kuala Lumpur. Output data/Other Countries/<country>/
+   <city>/ (sensors/openaq_<id>_<name>.csv in the Manila layout, locations.csv, station_quality.csv, source.json with the UTM zone and time zone). Kept: >= 6,000 hours, >= 12
+   calendar months, >= 50 % of the hours between first and last reading. TIME_LABEL "from" labels an hour by its start: compare one value with a Manila file before mixing.
+2. Pretrain: --stage pretrain --name N --source <country/city> (repeatable), configs/transfer.yaml, model/transfer/. Same window builder as Manila; spatial lag among the same
+   city's stations; local hour of day; scaled with MANILA's scalers (preprocess Manila first); LSTM-only model; early stopping on held-out source stations. Writes
+   pretrained_lstm.pt, summary.json, station_ranking.csv (maximum mean discrepancy of log PM2.5 and hour of day against the Manila TRAINING stations; transfer.top_k_stations
+   keeps the closest k; transfer.exclude_months drops calendar months, an option to test).
+3. Fine-tune: --stage train --override model.spatial_cnn.enabled=false --override train.init_from=<pretrained_lstm.pt>. Layers are copied when name and shape match; the temporal
+   branch must match completely or the run stops. train.freeze: any of spatial, temporal, head. Defaults (null, []) change nothing. run_info.json records the transfer.
+4. Compare: transfer_learning.ipynb. Checkpoints manila_only, single_<country>, mmd_top_<k>, all_sources; variants finetune, head_only (pretrained LSTM frozen), zero_shot (one pass
+   at learning rate 0); the same 16 Manila test stations; transfer_comparison.csv and .png. finetune against manila_only is the transfer; all_sources against mmd_top shows negative transfer.
+5. XGBoost: xgboost/training/transfer.py. --stage pretrain --pretrain-arm A --source ...: temporal features as in prep.py, morphology columns NaN, a booster saved to
+   outputs/pretrained/<name>/pretrained_booster.json; XGB_INIT_FROM=<file> makes the test stage and the production fit add the Manila trees on top. Same arm on both sides.
+Checked: unit tests (model/tests/test_transfer.py, other-country-scrapers/tests, xgboost/checks/test_transfer.py), and the chain preprocess -> pretrain -> finetune / head_only /
+zero_shot -> report on real Manila data with a synthetic source city. NOT run: the real source cities (needs the OpenAQ key and hours of downloading): no transfer result yet.
+Reference file (transferlearn.pdf): a chat with an assistant. Holds: temporal transfer, OpenAQ, single-country baseline, ranking by distribution distance, completeness floor, the
+four-checkpoint ablation. Wrong: the Zenodo HCMC / Bangkok sets are CAMS model output, not measurements; Kokkonen et al. 2021 (Nanjing) found morphology explained up to 73 % of the
+PM2.5 variance in street canyons (R2 0.076 is distance to roads alone); "Indriyati et al." is Musa, Adhi and Mulsandi 2025; "k = 8 to 15" has no source.

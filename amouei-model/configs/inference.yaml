@@ -1,0 +1,31 @@
+# City-wide inference (Section 4.5): one prediction + GeoCP interval for EVERY grid cell of the Master GeoTIFF.
+#
+# A cell without a sensor has no PM2.5 history of its own. Following the spatial-lag paragraph of
+# Preprocessing.txt ("areas without a PM2.5 reading rely on neighbouring cells' values"), the cell's
+# PM2.5 history is the spatial lag of its k nearest stations (data.yaml spatial_lag: k, weighting) at each
+# lag hour. That stand-in fills the PM2.5 and spatial-lag channels; patch, hour encoding and scalers are
+# exactly those of training.
+snapshot_hours: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+                                  # the whole day (default): a 24-hour animation / slideshow of how the air quality moves, and a true 24-hour
+                                  # mean. --date expands to these hours; --timestamp gives explicit hours. The old four-hour set is
+                                  # [8, 12, 17, 21] (Output.txt: morning commute peak, midday baseline, afternoon peak, night decay).
+                                  # Cost: one prediction surface per hour, so a 24-hour day takes 6 times as long as four hours.
+explain_hours: []                 # the hours --stage explain --date D runs Grad-CAM on. [] (default) = EVERY snapshot hour, so all 24 hours of a day and their aggregate.
+                                  # Each explained hour is slow: [8, 12, 17, 21] gives the four peak hours, six times faster. The hours must be in the infer run of that day.
+lag_reference: train    # train = neighbours are the proper-training stations (what the model and the GeoCP
+                        #         calibration saw); all = every station with data
+openaq_only_from_year: 2026   # hours of this year and later take their stand-in history from the OpenAQ stations ONLY
+                        # (null = always every reference station). The Quezon City sensors stopped on 2025-12-31, so from 2026
+                        # the 5 nearest stations of a cell around Quezon City are often all silent and the cell would get no
+                        # prediction (about 12 % of the map); choosing the 5 nearest OpenAQ stations fills those cells, from
+                        # farther away. The year of the hour being predicted decides. Applies to `infer` and `explain`.
+stride_px: 1            # predict every Nth pixel in each direction (must be odd). 1 = every cell.
+                        # A 10 m raster of the whole NCR has ~10^7 cells: raise this or use `window` for a first look.
+chunk_cells: 1024       # cells per forward pass. Measured on the 10 m raster (32 x 32 patches): the CNN needs ~1.2 GB extra RAM
+                        # at 1024 and ~5.1 GB at 4096, and 1024 is not slower per cell. Every chunk serves all hours of a date.
+progress: true          # print an estimate after the first chunk and progress lines for big grids
+                        # Speed on a 4-thread CPU: roughly 300-800 cells/s depending on load. The full raster at stride 1
+                        # (10.6 million cells) is therefore 4-10 HOURS per snapshot. stride_px 5 (50 m cells, 425 k cells)
+                        # is ~10-25 min, 11 is ~2-5 min, 21 (210 m cells, 24 k cells) is ~1 min. A GPU is much faster.
+                        # The first chunk prints a time estimate before the long part starts.
+window: null            # optional [row_start, row_stop, col_start, col_stop] in raster pixels

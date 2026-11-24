@@ -1,0 +1,14 @@
+experiment,seeds,test_r2,r2_gain,gain_min,gain_max,ci_low_min,ci_high_max,ci_low_max,rmse_above_30,parameters,verdict
+recommended,2,0.7278,0.0179,0.0172,0.0186,0.0149,0.0218,0.015,12.1754,171809,helps (every seed's interval above 0)
+window24,2,0.7226,0.0127,0.0122,0.0132,0.0093,0.0166,0.0105,12.2666,169073,helps (every seed's interval above 0)
+amouei_full,2,0.7225,0.0126,0.0119,0.0133,0.008,0.0185,0.0085,12.3968,548865,helps (every seed's interval above 0)
+amouei_lstm_w24,2,0.7165,0.0066,0.0019,0.0114,-0.0014,0.0147,0.0079,12.4568,532481,no clear effect
+weather_lead1,2,0.7155,0.0056,0.0046,0.0066,0.0028,0.0081,0.0047,12.2167,170897,helps (every seed's interval above 0)
+window12,2,0.7147,0.0048,0.0018,0.0077,-0.0036,0.0125,0.0035,12.7872,169073,no clear effect
+weather,2,0.7141,0.0042,0.003,0.0055,0.002,0.0066,0.0043,12.2729,170897,helps (every seed's interval above 0)
+amouei_lstm,2,0.711,0.0011,0.0001,0.0021,-0.0016,0.0041,0.0004,12.31,532481,no clear effect
+year,2,0.7104,0.0005,0.0003,0.0007,-0.0003,0.0016,-0.0,12.2766,169985,no clear effect
+baseline,2,0.7099,0.0,0.0,0.0,,,,12.2451,169073,
+road_density,2,0.7091,-0.0008,-0.0019,0.0004,-0.0033,0.0027,-0.0023,12.4114,169529,no clear effect
+lcz_proxy,2,0.7089,-0.001,-0.0019,-0.0001,-0.0035,0.0025,-0.0028,12.3787,173177,no clear effect
+morphology_tabular,2,0.7072,-0.0027,-0.0044,-0.0009,-0.0087,0.0038,-0.0054,12.7172,171353,no clear effect

@@ -1,0 +1,42 @@
+hourly_column,qc_id,note
+Nova_Market,1,Novaliches Wet & Dry Market
+Quirino_cor_Mindanao,2,Quirino Highway cor. Mindanao Ave.
+QCGH,3,Quezon City General Hospital
+StoDomingo_Church,4,Sto. Domingo Church
+Cubao_Arayat,5,Cubao Arayat Market
+Obrero_Industria,6,Obrero corner Calle Industria
+QCPL,7,Quezon City Public Library
+Commonwealth_BHall,8,Commonwealth Barangay Hall (listed first = primary when two columns share a site)
+Commonwealth_BH,8,Same sensor as Commonwealth_BHall under an older column name (2021-2023); only fills the hours BHall is empty
+LaLoma_PS,9,La Loma Police Station 1
+Erod_Ave,10,E. Rodriguez Sr. Ave.
+Silangan_BH,11,Silangan Barangay Hall
+Pansol_BH,12,Pansol Barangay Hall
+Kalusugan_BH,13,Kalusugan Barangay Hall
+N_Domingo,14,Valencia Barangay Hall (prev. N. Domingo)
+Susano_Rd,15,Susano Road
+Balintawak_Cloverleaf,16,Balintawak Cloverleaf
+Quirino_cor_Dominic,17,Quirino Highway cor. St. Dominic
+BatasanHills_BH,18,Batasan Hills Barangay Hall
+Kaligayahan_ElemS,19,Kaligayahan Elementary School
+Korphil_QCU,20,KorPhil - Quezon City University
+Payatas_SHC,21,Payatas Super Health Center
+P.Dela_Cruz_St.,22,SB Diversion Road (prev. P. Dela Cruz)
+FEU_Diliman,23,FEU Diliman
+Pasong_Tamo_ES,24,Pasong Tamo Elementary School
+Maligaya_EHS,25,Maligaya Elementary School
+Sauyo_BH,26,Barangay Sauyo
+San_Isidro_Church,27,San Isidro Church
+Lagro_HS,28,Largo High School (the site table spells it Largo)
+Old_Balara_EHS,29,Old Balara Elementary School
+New_EraU,30,New Era University
+QuezonAve./Sgt._Esguerra_Footbridge,31,Sgt. Esguerra Footbridge
+Jose_Rizal_HS,32,Jose Rizal High School
+Holy_Spirit_ES,33,Holy Spirit Elementary School
+Pearl_Drive_Footbridge,34,Pearl Drive Footbridge
+TandangSora_BH_Footbridge,35,Tandang Sora Barangay Hall Footbridge
+St._PeterChurch_Footbridge,36,St. Peter Parish Shrine of Leader Footbridge
+Libis_BH_Footbridge,37,Libis Barangay Hall Footbridge
+PCDF,38,Payatas Controlled Disposal Facility
+Tomas_Morato_Ave.,39,Tomas Morato Ave.
+EDSA/TimogAve._Footbridge,40,Timog Ave. cor. EDSA Footbridge

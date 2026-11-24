@@ -1,0 +1,70 @@
+$ C:\Users\perez\AppData\Local\Python\pythoncore-3.14-64\python.exe -u run_pipeline.py --stage train --override data.paths.master_raster=../data/Morphology/master_raster_v3.tif --override data.paths.sensor_locations_csv=../data/Combined Dataset/from_2023_with_preinstall/locations.csv --override data.paths.sensor_csv_dir=../data/Combined Dataset/from_2023_with_preinstall/sensors --override data.split.cv_assignment=by_station --override geocp.enabled=false --override model.spatial_cnn.enabled=false --override train.seed=43 --override data.paths.processed_dir=runs/from_2023_with_preinstall/ablation/processed_a89e8c34ed --override data.paths.checkpoints_dir=runs/from_2023_with_preinstall/ablation/checkpoints_amouei_full_s43 --override data.paths.snapshots_dir=runs/from_2023_with_preinstall/ablation/snapshots_amouei_full_s43 --override data.split.test_stations=[4526988, 4526989, 4797638, 4797658, 6303937, 6340868, 9000002, 9000009, 9000010, 9000015, 9000018, 9000019, 9000022, 9000028, 9000030, 9000034, 9000038] --override data.split.calibration_stations=[3990425, 3990426, 4795499, 4797643, 4797650, 4797661, 9000001, 9000008, 9000013, 9000014, 9000016, 9000027, 9000039] --override train.cv.enabled=false --override train.final_epochs=6 --override train.row_stride=4 --override model.temporal_lstm.layer_sizes=[256, 128, 64, 32] --override model.temporal_lstm.dropout=0.0 --override model.fusion_head.hidden_dims=[128] --override model.fusion_head.dropout=0.5 --override data.temporal.lags=[24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1] --override data.temporal.weather.enabled=true --override data.temporal.cyclical_year=true --override data.temporal.static_features=["road_density", "lcz_proxy"]
+train.row_stride = 4: fitting on every 4th training row (validation and test use all rows)
+final fit on all training stations for 6 epochs
+[final] epoch 1/6: 592 batches, about 3 min for this pass at the current speed; a progress line follows every 30 s
+the whole run takes about 32 min if every fit stops after ~12 epochs (early stopping), at most 53 min
+[final] epoch 1/6: 22.3%  132/592 batches  elapsed 35 s  remaining ~2 min
+[final] epoch 1/6: 41.7%  247/592 batches  elapsed 66 s  remaining ~2 min
+[final] epoch 1/6: 61.1%  362/592 batches  elapsed 2 min  remaining ~61 s
+[final] epoch 1/6: 80.1%  474/592 batches  elapsed 2 min  remaining ~31 s
+[final] epoch 1/6: 97.1%  575/592 batches  elapsed 3 min  remaining ~5 s
+[final] epoch   1/6  train 0.3870
+[final] epoch 2/6: 592 batches, about 3 min for this pass at the current speed; a progress line follows every 30 s
+[final] epoch 2/6: 22.1%  131/592 batches  elapsed 35 s  remaining ~2 min
+[final] epoch 2/6: 41.7%  247/592 batches  elapsed 66 s  remaining ~2 min
+[final] epoch 2/6: 61.3%  363/592 batches  elapsed 2 min  remaining ~60 s
+[final] epoch 2/6: 80.9%  479/592 batches  elapsed 2 min  remaining ~30 s
+[final] epoch   2/6  train 0.2919
+[final] epoch 3/6: 592 batches, about 3 min for this pass at the current speed; a progress line follows every 30 s
+[final] epoch 3/6: 23.1%  137/592 batches  elapsed 35 s  remaining ~2 min
+[final] epoch 3/6: 42.6%  252/592 batches  elapsed 66 s  remaining ~88 s
+[final] epoch 3/6: 62.0%  367/592 batches  elapsed 2 min  remaining ~59 s
+[final] epoch 3/6: 80.4%  476/592 batches  elapsed 2 min  remaining ~31 s
+[final] epoch 3/6: 98.8%  585/592 batches  elapsed 3 min  remaining ~2 s
+[final] epoch   3/6  train 0.2852
+[final] epoch 4/6: 592 batches, about 3 min for this pass at the current speed; a progress line follows every 30 s
+[final] epoch 4/6: 19.6%  116/592 batches  elapsed 36 s  remaining ~2 min
+[final] epoch 4/6: 31.9%  189/592 batches  elapsed 66 s  remaining ~2 min
+[final] epoch 4/6: 43.2%  256/592 batches  elapsed 2 min  remaining ~2 min
+[final] epoch 4/6: 54.4%  322/592 batches  elapsed 2 min  remaining ~2 min
+[final] epoch 4/6: 65.4%  387/592 batches  elapsed 3 min  remaining ~83 s
+[final] epoch 4/6: 76.7%  454/592 batches  elapsed 3 min  remaining ~57 s
+[final] epoch 4/6: 86.8%  514/592 batches  elapsed 4 min  remaining ~33 s
+[final] epoch 4/6: 97.5%  577/592 batches  elapsed 4 min  remaining ~6 s
+[final] epoch   4/6  train 0.2812
+[final] epoch 5/6: 592 batches, about 5 min for this pass at the current speed; a progress line follows every 30 s
+[final] epoch 5/6: 14.5%  86/592 batches  elapsed 39 s  remaining ~4 min
+[final] epoch 5/6: 25.7%  152/592 batches  elapsed 70 s  remaining ~3 min
+[final] epoch 5/6: 36.8%  218/592 batches  elapsed 2 min  remaining ~3 min
+[final] epoch 5/6: 48.0%  284/592 batches  elapsed 2 min  remaining ~2 min
+[final] epoch 5/6: 59.1%  350/592 batches  elapsed 3 min  remaining ~2 min
+[final] epoch 5/6: 70.3%  416/592 batches  elapsed 3 min  remaining ~80 s
+[final] epoch 5/6: 81.4%  482/592 batches  elapsed 4 min  remaining ~50 s
+[final] epoch 5/6: 92.6%  548/592 batches  elapsed 4 min  remaining ~20 s
+[final] epoch   5/6  train 0.2789
+[final] epoch 6/6: 592 batches, about 5 min for this pass at the current speed; a progress line follows every 30 s
+[final] epoch 6/6: 14.5%  86/592 batches  elapsed 40 s  remaining ~4 min
+[final] epoch 6/6: 25.7%  152/592 batches  elapsed 70 s  remaining ~3 min
+[final] epoch 6/6: 36.5%  216/592 batches  elapsed 2 min  remaining ~3 min
+[final] epoch 6/6: 47.6%  282/592 batches  elapsed 2 min  remaining ~2 min
+[final] epoch 6/6: 58.8%  348/592 batches  elapsed 3 min  remaining ~2 min
+[final] epoch 6/6: 69.4%  411/592 batches  elapsed 3 min  remaining ~84 s
+[final] epoch 6/6: 80.4%  476/592 batches  elapsed 4 min  remaining ~54 s
+[final] epoch 6/6: 91.6%  542/592 batches  elapsed 4 min  remaining ~23 s
+[final] epoch   6/6  train 0.2751
+run 20261124_030758 saved to C:\Users\perez\Downloads\THE THESIS MODEL\urban-air\amouei-model\runs\from_2023_with_preinstall\ablation\checkpoints_amouei_full_s43\20261124_030758
+==========================================================================
+TRAINING SUMMARY   run 20261124_030758
+==========================================================================
+Data    1,058,022 train rows (68 stations), 0 calibration rows (0 stations), 298,683 test rows (17 stations)
+Model   dual-branch CNN-LSTM, 548,865 parameters, spatial (CNN) branch OFF (temporal-only baseline), batch size 447, tuned: no
+
+Final model: fitted on all training stations for 6 epoch(s) (final_epochs override), last training loss 0.2751.
+
+These are validation figures. The accuracy on the TEST stations (never seen, not used to pick anything)
+and the uncertainty intervals come next:
+    python run_pipeline.py --stage report        (writes snapshots/<run>/SUMMARY.md)
+==========================================================================
+$ C:\Users\perez\AppData\Local\Python\pythoncore-3.14-64\python.exe -u -m experiments.predict_test --override data.paths.master_raster=../data/Morphology/master_raster_v3.tif --override data.paths.sensor_locations_csv=../data/Combined Dataset/from_2023_with_preinstall/locations.csv --override data.paths.sensor_csv_dir=../data/Combined Dataset/from_2023_with_preinstall/sensors --override data.split.cv_assignment=by_station --override geocp.enabled=false --override model.spatial_cnn.enabled=false --override train.seed=43 --override data.paths.processed_dir=runs/from_2023_with_preinstall/ablation/processed_a89e8c34ed --override data.paths.checkpoints_dir=runs/from_2023_with_preinstall/ablation/checkpoints_amouei_full_s43 --override data.paths.snapshots_dir=runs/from_2023_with_preinstall/ablation/snapshots_amouei_full_s43 --override data.split.test_stations=[4526988, 4526989, 4797638, 4797658, 6303937, 6340868, 9000002, 9000009, 9000010, 9000015, 9000018, 9000019, 9000022, 9000028, 9000030, 9000034, 9000038] --override data.split.calibration_stations=[3990425, 3990426, 4795499, 4797643, 4797650, 4797661, 9000001, 9000008, 9000013, 9000014, 9000016, 9000027, 9000039] --override train.cv.enabled=false --override train.final_epochs=6 --override train.row_stride=4 --override model.temporal_lstm.layer_sizes=[256, 128, 64, 32] --override model.temporal_lstm.dropout=0.0 --override model.fusion_head.hidden_dims=[128] --override model.fusion_head.dropout=0.5 --override data.temporal.lags=[24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1] --override data.temporal.weather.enabled=true --override data.temporal.cyclical_year=true --override data.temporal.static_features=["road_density", "lcz_proxy"]
+predicting test: 65.4%  191/292 batches  elapsed 30 s  remaining ~16 s
+GeoCP is switched off (geocp.enabled: false): predictions written, no intervals

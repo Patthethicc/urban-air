@@ -1,0 +1,23 @@
+# Install:  pip install -r requirements.txt
+# Names only, no pins: the exact versions this was developed and tested with are in requirements-tested.txt.
+# (torch: for a GPU build install it first from https://pytorch.org, then run this file.)
+numpy
+pandas
+torch
+scipy
+scikit-learn
+scikit-optimize
+pyyaml
+matplotlib
+rasterio
+geopandas
+shapely
+pyproj
+affine
+libpysal
+esda
+pytest
+
+# Optional: web-tile basemap for the AQI maps (needs internet when maps are drawn).
+# Without it the maps use the offline street/boundary layers or a plain background.
+# contextily

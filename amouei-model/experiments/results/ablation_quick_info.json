@@ -1,0 +1,10 @@
+{
+  "common_test_rows": 298683,
+  "test_stations": 16,
+  "quick": true,
+  "seeds": [
+    42,
+    43
+  ],
+  "persistence_r2": 0.6465998186991224
+}

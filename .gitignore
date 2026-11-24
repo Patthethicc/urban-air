@@ -19,3 +19,5 @@ model/runs/*/tl_cv/
 model/runs/*/lc/
 other-country-scrapers/_raw/
 *oof_predictions.csv
+# amouei-model: local ablation runs are GBs; the result tables are in amouei-model/experiments/results/
+amouei-model/runs/
