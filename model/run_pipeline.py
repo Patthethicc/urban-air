@@ -374,7 +374,8 @@ def train(cfg: dict) -> str:
             fit_ds, val_ds = Subset(fold_ds, fit_idx), Subset(fold_ds, val_idx)
             trainer = Trainer(build_model(mc, tc), tc, mc, str(run_dir), extra)    # warm start / frozen parts: train.init_from, train.freeze
             hist = trainer.fit(make_loader(fit_ds, tc, True), make_loader(val_ds, tc, False),
-                               ckpt_path=str(run_dir / f"fold_{k}.pt"), tag=f"[fold {k}]")
+                               ckpt_path=str(run_dir / f"fold_{k}.pt"), tag=f"[fold {k}]",
+                               state_path=str(run_dir / f"fold_{k}_state.pt"))      # a stopped fold continues at its last finished epoch
             _, y_true, y_pred = trainer.evaluate(make_loader(val_ds, tc, False))
             metrics = compute_all(scalers.inverse_y(y_true), scalers.inverse_y(y_pred))
             oof_parts.append(meta_train.iloc[val_idx][["location_id", "timestamp"]].reset_index(drop=True).assign(
@@ -390,6 +391,7 @@ def train(cfg: dict) -> str:
             })
             print(f"[fold {k}] held-out stations RMSE {metrics['rmse']:.3f}  MAE {metrics['mae']:.3f}  R2 {metrics['r2']:.3f}")
             _save_fold(run_dir, k, hist, info["cv"][-1], oof_parts[-1])      # so a stopped run can continue from here
+            (run_dir / f"fold_{k}_state.pt").unlink(missing_ok=True)         # the fold is stored: its epoch state is no longer needed
 
     if oof_parts:                                  # out-of-fold predictions: the spatial-bias analysis reads these
         pd.concat(oof_parts, ignore_index=True).to_csv(run_dir / "oof_predictions.csv", index=False)
@@ -400,7 +402,8 @@ def train(cfg: dict) -> str:
     set_seed(tc["seed"])
     trainer = Trainer(build_model(mc, tc), tc, mc, str(run_dir), extra)    # warm start / frozen parts: train.init_from, train.freeze
     hist = trainer.fit(make_loader(train_ds, tc, True), None, epochs=final_epochs,
-                       ckpt_path=str(run_dir / MODEL_FILE), tag="[final]")
+                       ckpt_path=str(run_dir / MODEL_FILE), tag="[final]", state_path=str(run_dir / "final_state.pt"))
+    (run_dir / "final_state.pt").unlink(missing_ok=True)             # the final model is stored
     history["final"] = hist
     info["status"] = "completed"
     from training.transfer import last_report

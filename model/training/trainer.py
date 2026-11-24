@@ -1,5 +1,7 @@
 """Training loop. Called directly by run_pipeline.py (no job queue)."""
 import copy
+import os
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -72,19 +74,47 @@ class Trainer:
                 progress.update(i)
         return total / max(n, 1), np.concatenate(ys), np.concatenate(ps)
 
+    def _save_state(self, path, sig, epoch, hist, best_state, best_val, since_best) -> None:
+        """Everything needed to continue after `epoch`: weights, optimiser, history and the early-stopping counters. Written to a temporary
+        file and renamed, so a kill during the write never leaves a half file."""
+        tmp = str(path) + ".tmp"
+        torch.save({"sig": sig, "epoch": epoch, "model": self.model.state_dict(), "optimizer": self.optimizer.state_dict(), "hist": hist,
+                    "best_state": best_state, "best_val": best_val, "since_best": since_best}, tmp)
+        os.replace(tmp, path)
+
     def fit(self, train_loader, val_loader=None, epochs: int | None = None, ckpt_path: str | None = None,
-            verbose: bool = True, tag: str = "") -> dict:
+            verbose: bool = True, tag: str = "", state_path: str | None = None) -> dict:
         """Run epochs and return a history dict.
 
         With a val_loader and train.early_stopping: stop on val loss, best weights restored (history['best_epoch']).
-        Without a val_loader, or with early_stopping false: exactly `epochs` epochs, final weights kept."""
+        Without a val_loader, or with early_stopping false: exactly `epochs` epochs, final weights kept.
+
+        state_path (optional): after every finished epoch the state is saved there; if the file exists when fit starts (and was made with the same
+        epochs, batches and early-stopping settings) training continues after its last finished epoch instead of at epoch 1. The caller deletes the
+        file when the fit's result is safely stored. An epoch that was running when the process stopped is lost (at most one epoch of work). The
+        order of the shuffled batches of a continued epoch differs from an uninterrupted run, so the numbers are not bit-for-bit identical."""
         epochs = int(epochs or self.train_cfg["epochs"])
         patience = int(self.train_cfg["early_stopping_patience"])
         stopping = bool(self.train_cfg.get("early_stopping", True))
         hist = {"train_loss": [], "val_loss": [], "best_epoch": None, "best_val_loss": None, "epochs_run": 0}
         best_state, best_val, since_best = None, float("inf"), 0
+        start = 1
+        sig = {"epochs": epochs, "batches": len(train_loader), "val": val_loader is not None, "stopping": stopping, "patience": patience}
+        if state_path and Path(state_path).is_file():
+            st = torch.load(state_path, map_location=self.device, weights_only=False)
+            if st.get("sig") == sig:
+                self.model.load_state_dict(st["model"])
+                self.optimizer.load_state_dict(st["optimizer"])
+                hist, best_state, best_val, since_best = st["hist"], st["best_state"], st["best_val"], st["since_best"]
+                start = st["epoch"] + 1
+                if stopping and val_loader is not None and since_best >= patience:     # it had already stopped early
+                    start = epochs + 1
+                if verbose:
+                    print(f"{tag} continuing after epoch {st['epoch']} (state saved by the stopped run: {state_path})".strip())
+            elif verbose:
+                print(f"{tag} the saved state was made with other settings; starting at epoch 1".strip())
 
-        for epoch in range(1, epochs + 1):
+        for epoch in range(start, epochs + 1):
             train_loss = self.train_epoch(train_loader, f"{tag} epoch {epoch}/{epochs}".strip(), verbose)
             hist["train_loss"].append(train_loss)
             msg = f"{tag} epoch {epoch:3d}/{epochs}  train {train_loss:.4f}"
@@ -101,6 +131,8 @@ class Trainer:
             hist["epochs_run"] = epoch
             if verbose:
                 print(msg)
+            if state_path:
+                self._save_state(state_path, sig, epoch, hist, best_state, best_val, since_best)
             if stopping and val_loader is not None and since_best >= patience:
                 if verbose:
                     print(f"{tag} early stop (no val improvement for {patience} epochs)")

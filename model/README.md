@@ -730,6 +730,13 @@ The switches most often wanted:
 
 ### 2.12b Long runs: progress and timeouts
 
+**Continuing after a stop (what is kept).** `train.resume: true` (the notebooks set it) continues the newest run that was stopped by the time budget or killed from outside. Three levels are kept:
+finished cross-validation **folds** (`fold_k_result.json` and the out-of-fold predictions), the **epoch state of the fold or final fit that was running** (`fold_k_state.pt` / `final_state.pt`: weights, optimiser, history and the
+early-stopping counters, written after every finished epoch and deleted once the fold or the model is stored), and the finished steps of the notebook (preprocess, report, maps). A stopped fold therefore continues after its last
+finished epoch (`[fold 0] continuing after epoch 7 ...`), and only the epoch that was running is lost. Two details: the order of the shuffled batches in a continued epoch differs from an uninterrupted run, so the numbers are not
+bit-for-bit identical; and a saved state is ignored (training starts at epoch 1) if it was made with other epochs, batch count or early-stopping settings. A fit stopped before this feature existed has no state file and restarts that fold at epoch 1.
+On Kaggle the state lives in `/kaggle/working`, so it survives only if you Save Version and add that output as an Input of the next session (README "The study in order", step E, and the notebook text).
+
 On a CPU one training epoch takes minutes to tens of minutes and, before, printed nothing until it ended, which looks like a
 freeze. Training now prints, from the first epoch:
 
